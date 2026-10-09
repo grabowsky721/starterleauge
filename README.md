@@ -1,65 +1,43 @@
-# StarterLeague Partner API – PINDOLZ
+# PINDOLZ Discord Bot
 
-Prosty klient do oficjalnego Partner API StarterLeague, który zwraca **tylko mecze drużyny PINDOLZ** (team id: `869`).
+Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (StarterLeague).
 
-## Endpointy używane
+## Funkcje
 
-- `GET /matches/upcoming`
-- `GET /matches/history`
-- `GET /matches/live`
-- `GET /standings`
+**Komendy:**
+- `/pindolz` – najbliższe + ostatnie mecze
+- `/live` – czy grają teraz
+- `/wyniki` – ostatnie wyniki
+- `/nadchodzące` – tylko przyszłe mecze
+- `/setup` – ustawia kanał główny (tylko właściciel)
+- `/setup-live` – ustawia kanał live (tylko właściciel)
 
-API **nie ma** filtra po drużynie, więc klient sam stronicuje i filtruje po `team1.id` / `team2.id`.
+**Automat:**
+- 2× dziennie (09:00 i 20:00 Europe/Warsaw) sprawdza wyniki i nadchodzące → pisze na kanał główny
+- Gdy jest mecz live → sprawdza co ~75 sekund
+  - start meczu → wiadomość na kanał live
+  - zmiana wyniku → aktualizacja wiadomości
+  - koniec meczu → finalny wynik
 
-## Szybki start
+## Secrets / zmienne środowiskowe
 
-1. Skopiuj `.env.example` → `.env` i wklej swój token:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Zainstaluj zależności:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Odpal:
-   ```bash
-   python -m src.main
-   ```
-
-## Token
-
-Token generujesz po zalogowaniu na https://starterleague.pl/api-partnerskie  
-Zaczyna się od `slp_`.
-
-**Nigdy** nie commituj pliku `.env`.
-
-## Przykład użycia w kodzie
-
-```python
-from src.client import StarterLeagueClient
-
-client = StarterLeagueClient()
-
-# tylko mecze PINDOLZ
-upcoming = client.get_pindolz_upcoming()
-history = client.get_pindolz_history()
-live = client.get_pindolz_live()
-
-print(f"Nadchodzące: {len(upcoming)}")
-print(f"Historia: {len(history)}")
-print(f"Live: {len(live)}")
+```env
+DISCORD_BOT_TOKEN=
+STARTERLEAGUE_API_TOKEN=
+OWNER_ID=
 ```
 
-## Struktura
+## Instalacja na hostingu Discord Bot
 
-```
-├── .env.example
-├── requirements.txt
-├── README.md
-└── src/
-    ├── __init__.py
-    ├── client.py      # główny klient API + filtr PINDOLZ
-    └── main.py        # przykład uruchomienia
-```
+1. Wgraj kod
+2. Ustaw zmienne środowiskowe (tokeny + swoje User ID)
+3. Zainstaluj zależności: `pip install -r requirements.txt`
+4. Uruchom: `python -m src.bot`
+
+## Uprawnienia bota
+
+Bot potrzebuje:
+- Send Messages
+- Embed Links
+- Use Application Commands
+- Read Message History (opcjonalnie)
