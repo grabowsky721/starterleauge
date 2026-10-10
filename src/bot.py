@@ -48,7 +48,6 @@ TABLE_UPDATE_TIMES = [
 ]
 LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
-# Soft-start rozłożony na ~1 min 30 s
 START_DELAY_LIVE = 15
 START_DELAY_PREMATCH = 30
 START_DELAY_TABLE = 45
@@ -108,6 +107,7 @@ class PindolzBot(commands.Bot):
         self._upcoming_cache: tuple[datetime, list] | None = None
         self.started_at = datetime.now(TZ)
         self._announced = False
+        self._live_errors = 0
         db.init_db()
 
     async def setup_hook(self):
@@ -156,21 +156,16 @@ class PindolzBot(commands.Bot):
             return None
 
     def _main_channel_id(self) -> int | None:
-        val = db.get_config("main_channel_id")
-        return int(val) if val else None
+        return db.get_config_int("main_channel_id")
 
     def _live_channel_id(self) -> int | None:
-        val = db.get_config("live_channel_id")
-        return int(val) if val else None
+        return db.get_config_int("live_channel_id")
 
     def _table_channel_id(self) -> int | None:
-        val = db.get_config("table_channel_id")
-        return int(val) if val else None
+        return db.get_config_int("table_channel_id")
 
     def _table_msg(self) -> tuple[int | None, int | None]:
-        mid = db.get_config("msg_table_id")
-        cid = db.get_config("msg_table_ch")
-        return (int(mid) if mid else None, int(cid) if cid else None)
+        return db.get_config_int("msg_table_id"), db.get_config_int("msg_table_ch")
 
     @staticmethod
     def _score_key(match: dict) -> str:
@@ -249,7 +244,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            table = self.api.get_division6_table()
+            table = await asyncio.to_thread(self.api.get_division6_table)
         except Exception as e:
             print(f"[table] API error: {e}")
             return
@@ -280,8 +275,8 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            history = self.api.get_pindolz_history()
-            upcoming = self.api.get_pindolz_upcoming()
+            history = await asyncio.to_thread(self.api.get_pindolz_history)
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
         except Exception as e:
             print(f"[daily] API error: {e}")
             return
@@ -429,10 +424,14 @@ class PindolzBot(commands.Bot):
             self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
             return
         try:
-            lives = self.api.get_pindolz_live()
+            lives = await asyncio.to_thread(self.api.get_pindolz_live)
+            self._live_errors = 0
         except Exception as e:
-            print(f"[live] API error: {e}")
-            self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
+            self._live_errors = getattr(self, "_live_errors", 0) + 1
+            print(f"[live] API error ({self._live_errors}): {e}")
+            backoff = min(30, LIVE_INTERVAL_IDLE * (1 + self._live_errors // 2))
+            if self.live_check.seconds != backoff:
+                self.live_check.change_interval(seconds=backoff)
             return
         target = LIVE_INTERVAL_ACTIVE if lives else LIVE_INTERVAL_IDLE
         if self.live_check.seconds != target:
@@ -468,7 +467,7 @@ class PindolzBot(commands.Bot):
             match_data = None
             history = []
             try:
-                history = self.api.get_pindolz_history()
+                history = await asyncio.to_thread(self.api.get_pindolz_history)
                 for h in history:
                     if h.get("id") == mid:
                         match_data = h
