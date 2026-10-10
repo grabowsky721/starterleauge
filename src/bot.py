@@ -32,7 +32,7 @@ TABLE_UPDATE_TIMES = [
 class RefreshView(discord.ui.View):
     def __init__(self, kind: str):
         super().__init__(timeout=None)
-         self.kind = kind  # "tabela" | "wyniki"
+        self.kind = kind  # "tabela" | "wyniki"
         self.refresh.custom_id = f"pindolz_refresh_{kind}"
 
     @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.secondary, custom_id="pindolz_refresh")
@@ -56,6 +56,7 @@ class PindolzBot(commands.Bot):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.api = StarterLeagueClient()
+        self._upcoming_cache: tuple[datetime, list] | None = None
         db.init_db()
 
     async def setup_hook(self):
@@ -63,6 +64,7 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshView("wyniki"))
         await self.tree.sync()
         self.daily_check.start()
+        self.prematch_check.start()
         self.live_check.start()
         self.table_update.start()
         self.weekly_summary.start()
@@ -327,6 +329,73 @@ class PindolzBot(commands.Bot):
                 msg_upcoming_ch=ch_id,
             )
 
+    # ---------- PRZYPOMNIENIE PRZED MECZEM ----------
+    PREMATCH_MINUTES = 30
+
+    def _upcoming_cached(self) -> list:
+        now = datetime.now(TZ)
+        if self._upcoming_cache and (now - self._upcoming_cache[0]) < timedelta(minutes=10):
+            return self._upcoming_cache[1]
+        data = self.api.get_pindolz_upcoming()
+        self._upcoming_cache = (now, data)
+        return data
+
+    @tasks.loop(minutes=1)
+    async def prematch_check(self):
+        channel = await self.get_channel_safe(self._main_channel_id())
+        if not channel:
+            return
+        try:
+            upcoming = self._upcoming_cached()
+        except Exception as e:
+            print(f"[prematch] API error: {e}")
+            return
+
+        now = datetime.now(TZ)
+        for m in upcoming:
+            mid = m.get("id")
+            dt = embeds._match_dt(m)
+            if mid is None or dt is None:
+                continue
+            delta = dt - now
+            if not (timedelta(0) < delta <= timedelta(minutes=self.PREMATCH_MINUTES)):
+                continue
+            key = f"prematch_{mid}"
+            if db.get_config(key):
+                continue
+            db.set_config(key, "1")
+
+            form = standing = opp_standing = None
+            try:
+                form = self.api.get_form(limit=5)
+            except Exception:
+                pass
+            try:
+                table = self.api.get_division6_table()
+                opp_name = self._opponent(m).upper()
+                for row in table:
+                    name = ((row.get("team") or {}).get("name") or "").upper()
+                    if name == "PINDOLZ":
+                        standing = row
+                    elif name == opp_name:
+                        opp_standing = row
+            except Exception:
+                pass
+            try:
+                await channel.send(
+                    embed=embeds.prematch_embed(
+                        m, form=form, standing=standing, opp_standing=opp_standing
+                    )
+                )
+                print(f"[prematch] wysłano przypomnienie o meczu {mid}")
+            except Exception as e:
+                db.set_config(key, None)
+                print(f"[prematch] send error: {e}")
+
+    @prematch_check.before_loop
+    async def before_prematch(self):
+        await self.wait_until_ready()
+
     # ---------- LIVE ----------
     @tasks.loop(seconds=10)
     async def live_check(self):
@@ -357,7 +426,6 @@ class PindolzBot(commands.Bot):
 
             if not row or not row.get("msg_live_id"):
                 emb = embeds.live_embed(m)
-                emb.title = "PINDOLZ gra teraz!"
                 msg = await channel.send(embed=emb)
                 db.upsert_match(
                     mid,
@@ -577,6 +645,28 @@ async def cmd_tabela(interaction: discord.Interaction):
         return
     await interaction.followup.send(
         embed=embeds.standings_embed(table), view=RefreshView("tabela")
+    )
+
+
+@bot.tree.command(name="team", description="Karta profilu drużyny PINDOLZ")
+async def cmd_team(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        table = bot.api.get_division6_table()
+        history = bot.api.get_pindolz_history()
+        upcoming = bot.api.get_pindolz_upcoming()
+    except Exception as e:
+        await interaction.followup.send(f"Błąd API: {e}")
+        return
+    standing = None
+    for row in table:
+        team = row.get("team") or {}
+        if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
+            standing = row
+            break
+    form = bot.api.get_form(history, limit=5)
+    await interaction.followup.send(
+        embed=embeds.team_embed(standing, history, upcoming, form, table_size=len(table))
     )
 
 
