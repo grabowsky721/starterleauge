@@ -3,6 +3,28 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Warsaw")
+PINDOLZ_ID = 869
+FOOTER = "PINDOLZ • StarterLeague"
+
+C_WIN = 0x22C55E
+C_LOSS = 0xEF4444
+C_UPCOMING = 0xF59E0B
+C_INFO = 0x3B82F6
+C_TABLE = 0x10B981
+C_TEAM = 0x6366F1
+C_NEUTRAL = 0x8B5CF6
+
+
+# ---------- helpery ----------
+def _base(title: str, color: int, description: str | None = None) -> discord.Embed:
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=datetime.now(TZ),
+    )
+    embed.set_footer(text=FOOTER)
+    return embed
 
 
 def _team_name(match: dict, side: str) -> str:
@@ -22,239 +44,106 @@ def _score_str(match: dict) -> str:
 def _opponent(match: dict) -> str:
     t1 = match.get("team1") or {}
     t2 = match.get("team2") or {}
-    if t1.get("name", "").upper() == "PINDOLZ":
-        return t2.get("name") or "???"
-    if t2.get("name", "").upper() == "PINDOLZ":
-        return t1.get("name") or "???"
-    if t1.get("id") == 869:
+    if t1.get("id") == PINDOLZ_ID or (t1.get("name") or "").upper() == "PINDOLZ":
         return t2.get("name") or "???"
     return t1.get("name") or "???"
+
+
+def _result(match: dict) -> bool | None:
+    winner = match.get("winnerTeamId")
+    if winner is None:
+        return None
+    return winner == PINDOLZ_ID
+
+
+def _icon(result: bool | None) -> str:
+    return {True: "🟩", False: "🟥", None: "⬜"}[result]
+
+
+def _form_icons(form: str | None) -> str:
+    if not form:
+        return "–"
+    return " ".join({"W": "🟩", "L": "🟥"}.get(c, "⬜") for c in form)
+
+
+def _match_dt(match: dict) -> datetime | None:
+    date = match.get("matchDate")
+    if not date:
+        return None
+    time = (match.get("matchTime") or "00:00:00")[:8]
+    if len(time) == 5:
+        time += ":00"
+    try:
+        return datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+    except Exception:
+        return None
+
+
+def _ts(match: dict, style: str = "F") -> str:
+    dt = _match_dt(match)
+    if not dt:
+        return match.get("matchDate") or "?"
+    return f"<t:{int(dt.timestamp())}:{style}>"
 
 
 def _fmt_datetime(match: dict) -> str:
     date = match.get("matchDate") or "?"
     time = (match.get("matchTime") or "")[:5]
-    if time:
-        return f"{date} {time}"
-    return date
+    return f"{date} {time}" if time else date
 
 
+def _signed(value) -> str:
+    try:
+        return f"{int(value):+d}"
+    except Exception:
+        return "–"
+
+
+def _medal(rank) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "🏅")
+
+
+# ---------- nadchodzące ----------
 def upcoming_embed(matches: list[dict]) -> discord.Embed:
-    embed = discord.Embed(
-        title="Nadchodzące mecze PINDOLZ",
-        color=0xF59E0B,
-        timestamp=datetime.now(TZ),
-    )
+    embed = _base("📅 Nadchodzące mecze PINDOLZ", C_UPCOMING)
     if not matches:
         embed.description = "Brak zaplanowanych meczów."
         return embed
 
+    lines = []
     for m in matches[:8]:
-        t1 = _team_name(m, "team1")
-        t2 = _team_name(m, "team2")
-        dt = _fmt_datetime(m)
         division = m.get("division") or ""
-        embed.add_field(
-            name=dt,
-            value=f"**{t1}** vs **{t2}**\n{division}",
-            inline=False,
+        lines.append(
+            f"🕒 {_ts(m, 'F')} · {_ts(m, 'R')}\n"
+            f"**{_team_name(m, 'team1')}** vs **{_team_name(m, 'team2')}**"
+            + (f"\n*{division}*" if division else "")
         )
+    embed.description = "\n\n".join(lines)
     return embed
 
 
 def single_upcoming_embed(match: dict) -> discord.Embed:
-    opponent = _opponent(match)
-    dt = _fmt_datetime(match)
-    division = match.get("division") or "-"
-    embed = discord.Embed(
-        title="Nadchodzący mecz PINDOLZ",
-        description=f"**PINDOLZ** vs **{opponent}**",
-        color=0xF59E0B,
-        timestamp=datetime.now(TZ),
+    embed = _base(
+        "📅 Nadchodzący mecz PINDOLZ",
+        C_UPCOMING,
+        f"## PINDOLZ  ⚔️  {_opponent(match)}",
     )
-    embed.add_field(name="Termin", value=dt, inline=True)
-    embed.add_field(name="Dywizja", value=division, inline=True)
-    embed.add_field(name="Best of", value=str(match.get("bestOf") or "?"), inline=True)
+    embed.add_field(name="🕒 Termin", value=f"{_ts(match, 'F')}\n{_ts(match, 'R')}", inline=True)
+    embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
+    embed.add_field(name="🎯 Format", value=f"Bo{match.get('bestOf') or '?'}", inline=True)
     return embed
 
 
-def history_embed(matches: list[dict], limit: int = 8) -> discord.Embed:
-    embed = discord.Embed(
-        title="Ostatnie wyniki PINDOLZ",
-        color=0x3B82F6,
-        timestamp=datetime.now(TZ),
-    )
-    if not matches:
-        embed.description = "Brak historii."
-        return embed
-
-    for m in matches[:limit]:
-        t1 = _team_name(m, "team1")
-        t2 = _team_name(m, "team2")
-        score = _score_str(m)
-        date = m.get("matchDate") or "?"
-        division = m.get("division") or ""
-        embed.add_field(
-            name=f"{date} · {score}",
-            value=f"**{t1}** vs **{t2}**\n{division}",
-            inline=False,
-        )
-    return embed
-
-
-def result_embed(
+def prematch_embed(
     match: dict,
     form: str | None = None,
     standing: dict | None = None,
+    opp_standing: dict | None = None,
 ) -> discord.Embed:
-    t1 = _team_name(match, "team1")
-    t2 = _team_name(match, "team2")
-    score = _score_str(match)
-    winner_id = match.get("winnerTeamId")
-    winner = "Remis / brak"
-    if winner_id:
-        if (match.get("team1") or {}).get("id") == winner_id:
-            winner = t1
-        elif (match.get("team2") or {}).get("id") == winner_id:
-            winner = t2
-
-    embed = discord.Embed(
-        title="Wynik meczu PINDOLZ",
-        description=f"**{t1}** {score} **{t2}**\nZwycięzca: **{winner}**",
-        color=0x8B5CF6,
-        timestamp=datetime.now(TZ),
-    )
-    embed.add_field(name="Data", value=match.get("matchDate") or "-", inline=True)
-    embed.add_field(name="Dywizja", value=match.get("division") or "-", inline=True)
-
-    if form:
-        embed.add_field(name="Forma (ost. 5)", value=f"`{form}`", inline=True)
-
-    if standing:
-        rank = standing.get("rank")
-        pts = standing.get("points")
-        if rank is not None:
-            embed.add_field(
-                name="Pozycja w tabeli",
-                value=f"**{rank}.** miejsce · **{pts if pts is not None else '–'}** pkt",
-                inline=False,
-            )
-
-    return embed
-
-
-def live_embed(match: dict) -> discord.Embed:
-    t1 = _team_name(match, "team1")
-    t2 = _team_name(match, "team2")
-    current = match.get("currentMap") or {}
-    map_name = current.get("name") or "?"
-    map_score = current.get("score") or {}
-    s1 = map_score.get("team1", 0)
-    s2 = map_score.get("team2", 0)
-    series = match.get("seriesScore") or {}
-    series_str = ""
-    if series and series.get("team1") is not None:
-        series_str = f"\nSeria: {series.get('team1', 0)}:{series.get('team2', 0)}"
-
-    embed = discord.Embed(
-        title="PINDOLZ gra teraz!",
-        description=f"**{t1}** vs **{t2}**",
-        color=0xEF4444,
-        timestamp=datetime.now(TZ),
-    )
-    embed.add_field(name="Mapa", value=f"{map_name}\n**{s1}:{s2}**{series_str}", inline=False)
-    embed.set_footer(text=match.get("division") or "")
-    return embed
-
-
-def match_started_embed(match: dict) -> discord.Embed:
     opponent = _opponent(match)
-    embed = discord.Embed(
-        title="Mecz właśnie się zaczął",
-        description=f"**PINDOLZ** zaczyna vs **{opponent}**",
-        color=0x22C55E,
-        timestamp=datetime.now(TZ),
+    embed = _base(
+        "⏰ Mecz PINDOLZ już za chwilę!",
+        C_UPCOMING,
+        f"## PINDOLZ  ⚔️  {opponent}\nStart {_ts(match, 'R')}",
     )
-    embed.add_field(name="Dywizja", value=match.get("division") or "-", inline=True)
-    embed.add_field(name="Best of", value=str(match.get("bestOf") or "?"), inline=True)
-    return embed
-
-
-def match_ended_embed(
-    match: dict,
-    form: str | None = None,
-    standing: dict | None = None,
-) -> discord.Embed:
-    return result_embed(match, form=form, standing=standing)
-
-
-def standings_embed(table: list[dict], division: str = "Starter Division 6") -> discord.Embed:
-    embed = discord.Embed(
-        title=f"Tabela · {division}",
-        color=0x10B981,
-        timestamp=datetime.now(TZ),
-    )
-    if not table:
-        embed.description = "Brak danych tabeli."
-        return embed
-
-    lines = []
-    for row in table[:16]:
-        rank = row.get("rank") or "?"
-        team = (row.get("team") or {}).get("name") or "???"
-        pts = row.get("points")
-        w = row.get("wins")
-        l = row.get("losses")
-        rd = row.get("roundDifference")
-        form = row.get("recentForm") or []
-        form_str = "".join(form[-5:]) if form else ""
-
-        name = f"**{team}**" if team.upper() == "PINDOLZ" else team
-        line = (
-            f"`{rank:>2}.` {name}  ·  {w or 0}W {l or 0}L  ·  "
-            f"RD {rd if rd is not None else '–'}  ·  **{pts if pts is not None else '–'} pkt**"
-        )
-        if form_str:
-            line += f"  ·  {form_str}"
-        lines.append(line)
-
-    embed.description = "\n".join(lines)
-    return embed
-
-
-def weekly_summary_embed(
-    matches: list[dict],
-    wins: int,
-    losses: int,
-    standing: dict | None,
-) -> discord.Embed:
-    embed = discord.Embed(
-        title="Podsumowanie tygodnia · PINDOLZ",
-        color=0x6366F1,
-        timestamp=datetime.now(TZ),
-    )
-    embed.add_field(name="Mecze", value=str(len(matches)), inline=True)
-    embed.add_field(name="Bilans", value=f"**{wins}W – {losses}L**", inline=True)
-
-    if standing:
-        rank = standing.get("rank")
-        pts = standing.get("points")
-        embed.add_field(
-            name="Pozycja",
-            value=f"**{rank}.** · {pts if pts is not None else '–'} pkt",
-            inline=True,
-        )
-
-    if matches:
-        lines = []
-        for m in matches[:10]:
-            t1 = _team_name(m, "team1")
-            t2 = _team_name(m, "team2")
-            score = _score_str(m)
-            date = m.get("matchDate") or "?"
-            lines.append(f"`{date}` {t1} {score} {t2}")
-        embed.add_field(name="Wyniki", value="\n".join(lines), inline=False)
-    else:
-        embed.description = "Brak meczów w tym tygodniu."
-
-    return embed
+    embed.add_field(name="🕒 Godzina", value=_ts(match, "t"), inline=True)
