@@ -1,8 +1,10 @@
+> **Wersja bota: `1.3.1`** · plik [`VERSION`](VERSION) · `/wersja`
+
 # PINDOLZ Discord Bot
 
 Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [StarterLeague](https://starterleague.pl).
 
-Aktualna wersja: plik [`VERSION`](VERSION) · komenda `/wersja`
+> Przy każdej zmianie kodu aktualizuj **`VERSION`** i tę linię na górze README.
 
 ---
 
@@ -179,3 +181,4 @@ python-dotenv>=1.0.0
 - Tokenów **nie** trzymaj w repozytorium ani w kodzie JS po stronie przeglądarki.
 - Filtr meczów PINDOLZ jest po stronie klienta (team id **869**).
 - Nieznane pola JSON z API są ignorowane (stabilność przy zmianach kontraktu).
+- **Wersja:** zawsze trzymaj zgodne `VERSION` + pierwsza linia README + `/wersja`.
