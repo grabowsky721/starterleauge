@@ -32,6 +32,14 @@ TABLE_UPDATE_TIMES = [
 LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
 
+# Opóźnienia soft-startu (sekundy od gotowości bota)
+START_DELAY_LIVE = 8
+START_DELAY_PREMATCH = 15
+START_DELAY_TABLE = 20
+START_DELAY_DAILY = 25
+START_DELAY_WEEKLY = 30
+START_DELAY_CLEANUP = 35
+
 
 class RefreshTabelaView(discord.ui.View):
     def __init__(self):
@@ -91,12 +99,42 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         await self.tree.sync()
-        self.daily_check.start()
-        self.prematch_check.start()
-        self.live_check.start()
-        self.table_update.start()
-        self.weekly_summary.start()
-        self.cleanup_task.start()
+        # Taski startują z opóźnieniem – mniej skoku CPU/RAM na starcie
+        asyncio.create_task(self._soft_start_tasks())
+
+    async def _soft_start_tasks(self):
+        await self.wait_until_ready()
+        print("[start] soft-start tasków...")
+
+        await asyncio.sleep(START_DELAY_LIVE)
+        if not self.live_check.is_running():
+            self.live_check.start()
+            print("[start] live_check")
+
+        await asyncio.sleep(START_DELAY_PREMATCH - START_DELAY_LIVE)
+        if not self.prematch_check.is_running():
+            self.prematch_check.start()
+            print("[start] prematch_check")
+
+        await asyncio.sleep(START_DELAY_TABLE - START_DELAY_PREMATCH)
+        if not self.table_update.is_running():
+            self.table_update.start()
+            print("[start] table_update")
+
+        await asyncio.sleep(START_DELAY_DAILY - START_DELAY_TABLE)
+        if not self.daily_check.is_running():
+            self.daily_check.start()
+            print("[start] daily_check")
+
+        await asyncio.sleep(START_DELAY_WEEKLY - START_DELAY_DAILY)
+        if not self.weekly_summary.is_running():
+            self.weekly_summary.start()
+            print("[start] weekly_summary")
+
+        await asyncio.sleep(START_DELAY_CLEANUP - START_DELAY_WEEKLY)
+        if not self.cleanup_task.is_running():
+            self.cleanup_task.start()
+            print("[start] cleanup_task – soft-start zakończony")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         return bool(
@@ -807,7 +845,7 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
 @bot.event
 async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
-    print("Bot gotowy.")
+    print("Bot gotowy – taski wystartują stopniowo.")
 
 
 if __name__ == "__main__":
