@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -41,7 +42,7 @@ class RefreshView(discord.ui.View):
         try:
             if self.kind == "tabela":
                 table = bot.api.get_division6_table()
-                emb = embeds.standings_embed(table)
+                emb = embeds.standings_embed(table, changes=bot._rank_changes(table))
             else:
                 history = bot.api.get_pindolz_history()
                 emb = embeds.history_embed(history)
@@ -57,6 +58,8 @@ class PindolzBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.api = StarterLeagueClient()
         self._upcoming_cache: tuple[datetime, list] | None = None
+        self.started_at = datetime.now(TZ)
+        self._announced = False
         db.init_db()
 
     async def setup_hook(self):
@@ -153,6 +156,46 @@ class PindolzBot(commands.Bot):
         msg = await channel.send(embed=embed, view=view)
         return msg.id, channel.id  # type: ignore
 
+    # ---------- zmiana pozycji w tabeli ----------
+    @staticmethod
+    def _ranks_json(table: list[dict]) -> str:
+        ranks = {}
+        for row in table:
+            name = ((row.get("team") or {}).get("name") or "").upper()
+            rank = row.get("rank")
+            if name and isinstance(rank, int):
+                ranks[name] = rank
+        return json.dumps(ranks)
+
+    def _rank_changes(self, table: list[dict]) -> dict[str, int]:
+        """Zmiana pozycji względem poprzedniej aktualizacji (dodatnia = awans)."""
+        try:
+            prev = json.loads(db.get_config("table_prev_ranks") or "{}")
+        except Exception:
+            prev = {}
+        changes: dict[str, int] = {}
+        for row in table:
+            name = ((row.get("team") or {}).get("name") or "").upper()
+            rank = row.get("rank")
+            old = prev.get(name)
+            if name and isinstance(rank, int) and isinstance(old, int):
+                changes[name] = old - rank
+        return changes
+
+    async def _react_result(self, ch_id: int | None, msg_id: int | None, match: dict):
+        """Reakcja pod wynikiem: 🎉 po wygranej, 😢 po porażce."""
+        won = self.api.did_pindolz_win(match)
+        if won is None or not ch_id or not msg_id:
+            return
+        try:
+            ch = await self.get_channel_safe(ch_id)
+            if not ch:
+                return
+            msg = await ch.fetch_message(msg_id)
+            await msg.add_reaction("🎉" if won else "😢")
+        except Exception as e:
+            print(f"[react] {e}")
+
     # ---------- TABELA ----------
     @tasks.loop(time=TABLE_UPDATE_TIMES)
     async def table_update(self):
@@ -173,7 +216,12 @@ class PindolzBot(commands.Bot):
             return
         if not table:
             return
-        emb = embeds.standings_embed(table)
+        last = db.get_config("table_last_ranks")
+        if last:
+            db.set_config("table_prev_ranks", last)
+        changes = self._rank_changes(table)
+        db.set_config("table_last_ranks", self._ranks_json(table))
+        emb = embeds.standings_embed(table, changes=changes)
         msg_id, ch_id = self._table_msg()
         new_msg_id, new_ch_id = await self._edit_or_send(
             channel, emb, msg_id, ch_id, view=RefreshView("tabela")
@@ -243,6 +291,7 @@ class PindolzBot(commands.Bot):
                 None,
                 None,
             )
+            await self._react_result(ch_id, msg_id, m)
             db.upsert_match(
                 mid,
                 match_date=m.get("matchDate"),
@@ -496,6 +545,7 @@ class PindolzBot(commands.Bot):
                             None,
                             None,
                         )
+                        await self._react_result(ch_id, msg_id, match_data)
                         db.upsert_match(
                             mid,
                             notified_result=1,
@@ -644,7 +694,8 @@ async def cmd_tabela(interaction: discord.Interaction):
         await interaction.followup.send(f"Błąd API: {e}")
         return
     await interaction.followup.send(
-        embed=embeds.standings_embed(table), view=RefreshView("tabela")
+        embed=embeds.standings_embed(table, changes=bot._rank_changes(table)),
+        view=RefreshView("tabela"),
     )
 
 
@@ -668,6 +719,34 @@ async def cmd_team(interaction: discord.Interaction):
     await interaction.followup.send(
         embed=embeds.team_embed(standing, history, upcoming, form, table_size=len(table))
     )
+
+
+@bot.tree.command(name="forma", description="Forma PINDOLZ z ostatnich 5 meczów")
+async def cmd_forma(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        history = bot.api.get_pindolz_history()
+    except Exception as e:
+        await interaction.followup.send(f"Błąd API: {e}")
+        return
+    form = bot.api.get_form(history, limit=5)
+    await interaction.followup.send(embed=embeds.form_embed(form, history[:5]))
+
+
+@bot.tree.command(name="ping", description="Sprawdź, czy bot działa")
+async def cmd_ping(interaction: discord.Interaction):
+    latency = round(bot.latency * 1000)
+    delta = datetime.now(TZ) - bot.started_at
+    days, rem = divmod(int(delta.total_seconds()), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    uptime = (f"{days}d " if days else "") + f"{hours}h {minutes}m"
+    await interaction.response.send_message(embed=embeds.ping_embed(latency, uptime))
+
+
+@bot.tree.command(name="pomoc", description="Lista komend bota")
+async def cmd_pomoc(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embeds.help_embed())
 
 
 @bot.tree.command(name="setup", description="Ustaw kanał główny (wyniki + nadchodzące)")
@@ -711,6 +790,8 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
     try:
         table = bot.api.get_division6_table()
         if table:
+            db.set_config("table_last_ranks", bot._ranks_json(table))
+            db.set_config("table_prev_ranks", None)
             emb = embeds.standings_embed(table)
             msg = await kanal.send(embed=emb, view=RefreshView("tabela"))
             db.set_config("msg_table_id", str(msg.id))
@@ -736,6 +817,14 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
 async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
     print("Bot gotowy.")
+    if not bot._announced:
+        bot._announced = True
+        channel = await bot.get_channel_safe(bot._main_channel_id())
+        if channel:
+            try:
+                await channel.send(embed=embeds.online_embed(), delete_after=300)
+            except Exception as e:
+                print(f"[online] {e}")
 
 
 if __name__ == "__main__":
