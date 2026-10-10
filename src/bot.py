@@ -340,9 +340,15 @@ class PindolzBot(commands.Bot):
             row = db.get_match(mid)
             opponent = self._opponent(m)
             if row and row.get("notified_upcoming"):
-                changed = row.get("match_date") != m.get("matchDate") or (row.get("match_time") or "")[:5] != (m.get("matchTime") or "")[:5] or row.get("opponent") != opponent
-                if changed:
+                date_changed = row.get("match_date") != m.get("matchDate") or (row.get("match_time") or "")[:5] != (m.get("matchTime") or "")[:5]
+                opp_changed = row.get("opponent") != opponent
+                if date_changed or opp_changed:
                     msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), row.get("msg_upcoming_id"), row.get("msg_upcoming_ch"))
+                    if date_changed:
+                        try:
+                            await channel.send(embed=embeds.schedule_changed_embed(m, row.get("match_date"), row.get("match_time")))
+                        except Exception as e:
+                            print(f"[schedule] send error: {e}")
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None)
@@ -606,6 +612,11 @@ async def cmd_tabela(interaction: discord.Interaction):
     await interaction.followup.send(embed=embeds.standings_embed(table, changes=bot._rank_changes(table)), view=refresh_view("tabela"))
 
 
+@bot.tree.command(name="pomoc", description="Lista komend i automatów bota")
+async def cmd_pomoc(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embeds.help_embed(), ephemeral=True)
+
+
 @bot.tree.command(name="wersja", description="Aktualna wersja bota")
 async def cmd_wersja(interaction: discord.Interaction):
     uptime = datetime.now(TZ) - bot.started_at
@@ -716,6 +727,35 @@ async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
     print(f"Wersja: {BOT_VERSION}")
     print("Bot gotowy – taski wystartują stopniowo.")
+    if bot._announced:
+        return
+    bot._announced = True
+
+    async def _send_restart_notice():
+        channel = await bot.get_channel_safe(bot._main_channel_id())
+        if not channel:
+            return
+        try:
+            emb = embeds.restart_embed(
+                BOT_VERSION,
+                bot._main_channel_id(),
+                bot._live_channel_id(),
+                bot._table_channel_id(),
+            )
+            msg = await channel.send(embed=emb)
+
+            async def _delete_later():
+                await asyncio.sleep(600)
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+
+            asyncio.create_task(_delete_later())
+        except Exception as e:
+            print(f"[restart-msg] {e}")
+
+    asyncio.create_task(_send_restart_notice())
 
 
 if __name__ == "__main__":
