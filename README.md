@@ -8,36 +8,32 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (StarterLeague).
 - `/pindolz` – najbliższe + ostatnie mecze
 - `/live` – czy grają teraz
 - `/wyniki` – ostatnie wyniki
-- `/nadchodzące` – tylko przyszłe mecze
-- `/setup` – ustawia kanał główny (tylko właściciel)
-- `/setup-live` – ustawia kanał live (tylko właściciel)
+- `/nadchodzace` – tylko przyszłe mecze
+- `/tabela` – tabela Starter Division 6
+- `/setup` – kanał główny (właściciel)
+- `/setup-live` – kanał live (właściciel)
 
 **Automat:**
-- 2× dziennie (09:00 i 20:00 Europe/Warsaw) sprawdza wyniki i nadchodzące → pisze na kanał główny
-- Gdy jest mecz live → sprawdza co ~75 sekund
-  - start meczu → wiadomość na kanał live
-  - zmiana wyniku → aktualizacja wiadomości
-  - koniec meczu → finalny wynik
+- 09:00 i 20:00 (Europe/Warsaw) – nowe wyniki + nadchodzące (24–48h)
+- LIVE co **10 sekund** – start / wynik mapy / koniec (edycja tej samej wiadomości)
+- SQLite – pamięta ID wiadomości po restarcie
+- Cleanup starych rekordów po 30 dniach
 
-## Secrets / zmienne środowiskowe
+## Secrets
 
 ```env
 DISCORD_BOT_TOKEN=
 STARTERLEAGUE_API_TOKEN=
-OWNER_ID=
+OWNER_ID=          # opcjonalne; bez tego działa właściciel serwera
 ```
 
-## Instalacja na hostingu Discord Bot
+## Uruchomienie
 
-1. Wgraj kod
-2. Ustaw zmienne środowiskowe (tokeny + swoje User ID)
-3. Zainstaluj zależności: `pip install -r requirements.txt`
-4. Uruchom: `python -m src.bot`
+```bash
+pip install -r requirements.txt
+python -m src.bot
+```
 
-## Uprawnienia bota
-
-Bot potrzebuje:
-- Send Messages
-- Embed Links
-- Use Application Commands
-- Read Message History (opcjonalnie)
+Potem na Discordzie:
+1. `/setup #kanał-główny`
+2. `/setup-live #kanał-live`
