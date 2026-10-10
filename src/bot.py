@@ -32,7 +32,8 @@ TABLE_UPDATE_TIMES = [
 class RefreshView(discord.ui.View):
     def __init__(self, kind: str):
         super().__init__(timeout=None)
-        self.kind = kind  # "tabela" | "wyniki"
+         self.kind = kind  # "tabela" | "wyniki"
+        self.refresh.custom_id = f"pindolz_refresh_{kind}"
 
     @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.secondary, custom_id="pindolz_refresh")
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
