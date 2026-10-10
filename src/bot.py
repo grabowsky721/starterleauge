@@ -108,6 +108,8 @@ class PindolzBot(commands.Bot):
         self.started_at = datetime.now(TZ)
         self._announced = False
         self._live_errors = 0
+        self._status_idx = 0
+        self._status_current = None
         db.init_db()
 
     async def setup_hook(self):
@@ -143,6 +145,9 @@ class PindolzBot(commands.Bot):
         if not self.cleanup_task.is_running():
             self.cleanup_task.start()
             print("[start] cleanup_task – soft-start zakończony")
+        if not self.status_loop.is_running():
+            self.status_loop.start()
+            print("[start] status_loop")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         return bool(interaction.guild and interaction.user.id == interaction.guild.owner_id)
@@ -534,6 +539,116 @@ class PindolzBot(commands.Bot):
 
     @weekly_summary.before_loop
     async def before_weekly(self):
+        await self.wait_until_ready()
+
+    # ---------- STATUS BOTA ----------
+    @staticmethod
+    def _pl_plural(n: int, one: str, few: str, many: str) -> str:
+        if n == 1:
+            return one
+        if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+            return few
+        return many
+
+    @staticmethod
+    def _time_left(delta: timedelta) -> str:
+        mins = max(1, int(delta.total_seconds() // 60))
+        if mins >= 1440:
+            d = mins // 1440
+            return f"{d} {'dzień' if d == 1 else 'dni'}"
+        if mins >= 60:
+            return f"{mins // 60} godz."
+        return f"{mins} min"
+
+    async def _build_statuses(self) -> tuple[list[str], bool]:
+        """Zwraca (lista tekstów statusu do rotacji, czy trwa LIVE)."""
+        now = datetime.now(TZ)
+
+        # 3. LIVE – ma pierwszeństwo
+        try:
+            lives = await asyncio.to_thread(self.api.get_pindolz_live)
+        except Exception:
+            lives = []
+        if lives:
+            m = lives[0]
+            t1 = (m.get("team1") or {}).get("name") or "???"
+            t2 = (m.get("team2") or {}).get("name") or "???"
+            series = m.get("seriesScore") or {}
+            cur = (m.get("currentMap") or {}).get("score") or {}
+            s1, s2 = series.get("team1") or 0, series.get("team2") or 0
+            if s1 + s2 == 0:
+                s1, s2 = cur.get("team1") or 0, cur.get("team2") or 0
+            return [f"🔴 LIVE: {t1} {s1}:{s2} {t2}"[:128]], True
+
+        statuses: list[str] = []
+
+        # 1 + 2. Odliczanie i „dziś gramy"
+        try:
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+        except Exception:
+            upcoming = []
+        nxt = None
+        for m in upcoming:
+            dt = embeds._match_dt(m)
+            if dt and dt > now and (nxt is None or dt < nxt[0]):
+                nxt = (dt, m)
+        if nxt:
+            dt, m = nxt
+            opp = self._opponent(m)
+            if dt.date() == now.date():
+                statuses.append(f"🎮 Dziś o {dt.strftime('%H:%M')} vs {opp}")
+            statuses.append(f"⏳ PINDOLZ vs {opp} za {self._time_left(dt - now)}")
+
+        # 8. Seria wygranych / porażek
+        try:
+            history = await asyncio.to_thread(self.api.get_pindolz_history)
+        except Exception:
+            history = []
+        streak = 0
+        first = None
+        for m in history:
+            winner = m.get("winnerTeamId")
+            if winner is None:
+                break
+            won = winner == PINDOLZ_TEAM_ID
+            if first is None:
+                first = won
+            if won != first:
+                break
+            streak += 1
+        if streak >= 2:
+            if first:
+                word = self._pl_plural(streak, "wygrana", "wygrane", "wygranych")
+                statuses.append(f"🔥 {streak} {word} z rzędu")
+            else:
+                word = self._pl_plural(streak, "porażka", "porażki", "porażek")
+                statuses.append(f"📉 {streak} {word} z rzędu")
+
+        if not statuses:
+            statuses.append("👀 PINDOLZ · /pomoc")
+        return [s[:128] for s in statuses], False
+
+    @tasks.loop(seconds=30)
+    async def status_loop(self):
+        try:
+            statuses, is_live = await self._build_statuses()
+        except Exception as e:
+            print(f"[status] error: {e}")
+            return
+        text = statuses[self._status_idx % len(statuses)]
+        self._status_idx += 1
+        # 12. dnd (czerwona kropka) w trakcie LIVE, w pozostałych chwilach online
+        state = discord.Status.dnd if is_live else discord.Status.online
+        if self._status_current == (text, state):
+            return
+        try:
+            await self.change_presence(status=state, activity=discord.CustomActivity(name=text))
+            self._status_current = (text, state)
+        except Exception as e:
+            print(f"[status] change_presence error: {e}")
+
+    @status_loop.before_loop
+    async def before_status(self):
         await self.wait_until_ready()
 
     @tasks.loop(time=time(4, 0, tzinfo=TZ))
