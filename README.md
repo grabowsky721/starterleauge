@@ -2,12 +2,17 @@
 
 Bot Discorda do śledzenia meczów drużyny **PINDOLZ** w lidze [StarterLeague](https://starterleague.pl).
 
-- Terminarz i wyniki
-- LIVE co 10 sekund (edycja tej samej wiadomości)
-- Automatyczna tabela **Starter Division 6**
-- Forma, pozycja w tabeli, podsumowanie tygodnia
+## Funkcje
+
+- Terminarz i wyniki (edycja zamiast spamu)
+- LIVE co **10 sekund** – start / wynik mapy / koniec
+- Automatyczna tabela **Starter Division 6** (+ zmiany pozycji)
+- Forma ostatnich 5 meczów i pozycja w tabeli przy wyniku
+- Przypomnienie **30 min** przed meczem
+- Podsumowanie tygodnia (niedziela 20:00)
 - Przycisk **Odśwież** przy tabeli i wynikach
-- SQLite – pamięta stan po restarcie
+- Reakcje pod wynikami (🎉 wygrana / 😢 porażka)
+- SQLite – pamięta stan i ID wiadomości po restarcie
 
 ---
 
@@ -17,41 +22,33 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** w lidze [StarterLeague](
 |---------|------|-----|
 | `/pindolz` | Najbliższe + ostatnie mecze | wszyscy |
 | `/live` | Czy PINDOLZ gra teraz | wszyscy |
-| `/wyniki` | Ostatnie wyniki (+ przycisk Odśwież) | wszyscy |
+| `/wyniki` | Ostatnie wyniki (+ Odśwież) | wszyscy |
 | `/nadchodzace` | Tylko przyszłe mecze | wszyscy |
-| `/tabela` | Tabela Starter Division 6 (+ przycisk Odśwież) | wszyscy |
+| `/tabela` | Tabela Starter Division 6 (+ Odśwież) | wszyscy |
 | `/setup` | Kanał główny (wyniki + nadchodzące) | właściciel serwera |
 | `/setup-live` | Kanał LIVE | właściciel serwera |
 | `/setup-tabela` | Kanał tabeli Division 6 | właściciel serwera |
 
 ---
 
-## Automatyczne powiadomienia
+## Harmonogram (Europe/Warsaw)
 
 | Co | Kiedy | Kanał |
 |----|-------|-------|
-| Nowe wyniki + nadchodzące (24–48h) | **09:00** i **20:00** | główny |
-| LIVE – start / wynik mapy / koniec | co **10 sekund** | live |
+| Nowe wyniki + nadchodzące (24–48h) | **09:00**, **20:00** | główny |
+| Przypomnienie przed meczem | **30 min** przed startem | główny |
+| LIVE | co **10 s** | live |
 | Tabela Division 6 | **08:00, 18:00, 20:00, 21:30, 23:00** | tabela |
 | Podsumowanie tygodnia | **niedziela 20:00** | główny |
 | Cleanup starych rekordów | **04:00** | – |
 
-Wszystkie godziny w strefie **Europe/Warsaw**.
-
-Bot **edytuje** istniejące wiadomości zamiast spamować nowymi.
-
-### Wynik meczu zawiera dodatkowo:
-- **Formę** ostatnich 5 meczów (np. `WWLWL`)
-- **Pozycję w tabeli** Division 6 (miejsce + punkty)
-
-### Podsumowanie tygodnia:
-- liczba meczów, bilans W–L, pozycja, lista wyników z ostatnich 7 dni
+Bot **edytuje** istniejące wiadomości zamiast wysyłać nowe.
 
 ---
 
 ## Wymagania
 
-- Python 3.10+
+- Python **3.10+**
 - Token bota Discord
 - Token Partner API StarterLeague (`slp_...`)
 
@@ -62,26 +59,26 @@ Bot **edytuje** istniejące wiadomości zamiast spamować nowymi.
 ### 1. Discord Bot
 
 1. https://discord.com/developers/applications → **New Application**
-2. Zakładka **Bot** → **Reset Token** → skopiuj token
+2. **Bot** → **Reset Token** → skopiuj token
 3. **OAuth2 → URL Generator**:
    - Scopes: `bot`, `applications.commands`
-   - Permissions: Send Messages, Embed Links, Read Message History, Use Application Commands
-4. Zaproś bota na serwer wygenerowanym linkiem
+   - Permissions: Send Messages, Embed Links, Add Reactions, Read Message History, Use Application Commands
+4. Zaproś bota na serwer
 
 ### 2. Token StarterLeague
 
-1. Zaloguj się na https://starterleague.pl/api-partnerskie
+1. https://starterleague.pl/api-partnerskie
 2. Zaakceptuj regulamin
-3. Skopiuj token zaczynający się od `slp_`
+3. Skopiuj token `slp_...`
 
-### 3. Hosting
-
-Ustaw zmienne środowiskowe:
+### 3. Zmienne środowiskowe
 
 ```env
 DISCORD_BOT_TOKEN=twoj_token_bota
 STARTERLEAGUE_API_TOKEN=slp_twoj_token
 ```
+
+### 4. Uruchomienie lokalne
 
 ```bash
 git clone https://github.com/grabowsky721/starterleauge.git
@@ -90,21 +87,42 @@ pip install -r requirements.txt
 python -m src.bot
 ```
 
-Start command na panelu hostingu:
+Albo:
 
+```bash
+python src/bot.py
 ```
-python -m src.bot
-```
 
-### 4. Konfiguracja na Discordzie
+(w `bot.py` jest poprawka `sys.path`, więc obie metody działają)
 
-Po starcie bota (jako **właściciel serwera**):
+### 5. GameHost / panel Discord Bot
+
+| Pole | Wartość |
+|------|---------|
+| Git Repo Address | `https://github.com/grabowsky721/starterleauge` |
+| Git Branch | `main` |
+| Auto Update | `1` |
+| Bot py file | **`src/bot.py`** |
+| Requirements file | `requirements.txt` |
+| User Uploaded Files | `0` |
+
+Repo publiczne – **Git Username / Token nie są potrzebne**.
+
+Tokeny bota ustaw w **Environment / Secrets** panelu (nie w parametrach startowych Gita).
+
+Po zapisie **zrestartuj serwer**. Przy każdym restarcie Auto Update ściąga najnowszy kod z `main`.
+
+### 6. Konfiguracja na Discordzie
+
+Jako **właściciel serwera**:
 
 ```
 /setup #kanał-wyniki
 /setup-live #kanał-live
 /setup-tabela #kanał-tabela
 ```
+
+`/setup-tabela` od razu wysyła tabelę i od tej pory aktualizuje ją o wyznaczonych godzinach.
 
 ---
 
@@ -115,14 +133,14 @@ Po starcie bota (jako **właściciel serwera**):
 ├── requirements.txt
 ├── README.md
 └── src/
-    ├── bot.py       # bot, komendy, schedulery, przycisk Odśwież
+    ├── bot.py       # bot, komendy, schedulery, przyciski
     ├── client.py    # Partner API StarterLeague
-    ├── db.py        # SQLite
-    ├── embeds.py    # wygląd wiadomości
+    ├── db.py        # SQLite (mecze, config, ID wiadomości)
+    ├── embeds.py    # wygląd embedów
     └── main.py      # stary CLI (opcjonalny)
 ```
 
-Dane zapisują się w katalogu `data/`.
+Dane (SQLite + config) → katalog `data/`.
 
 ---
 
