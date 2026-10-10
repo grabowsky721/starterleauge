@@ -147,3 +147,225 @@ def prematch_embed(
         f"## PINDOLZ  ⚔️  {opponent}\nStart {_ts(match, 'R')}",
     )
     embed.add_field(name="🕒 Godzina", value=_ts(match, "t"), inline=True)
+    embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
+    embed.add_field(name="🎯 Format", value=f"Bo{match.get('bestOf') or '?'}", inline=True)
+
+    if standing and standing.get("rank") is not None:
+        embed.add_field(
+            name="📊 PINDOLZ",
+            value=f"{standing.get('rank')}. miejsce · **{standing.get('points', '–')}** pkt",
+            inline=True,
+        )
+    if opp_standing and opp_standing.get("rank") is not None:
+        embed.add_field(
+            name=f"📊 {opponent}",
+            value=f"{opp_standing.get('rank')}. miejsce · **{opp_standing.get('points', '–')}** pkt",
+            inline=True,
+        )
+    if form:
+        embed.add_field(name="🔥 Forma PINDOLZ", value=_form_icons(form), inline=False)
+    return embed
+
+
+# ---------- historia i wyniki ----------
+def history_embed(matches: list[dict], limit: int = 8) -> discord.Embed:
+    embed = _base("📜 Ostatnie wyniki PINDOLZ", C_INFO)
+    if not matches:
+        embed.description = "Brak historii."
+        return embed
+
+    lines = []
+    for m in matches[:limit]:
+        lines.append(
+            f"{_icon(_result(m))} `{m.get('matchDate') or '?'}`  "
+            f"**{_team_name(m, 'team1')}** {_score_str(m)} **{_team_name(m, 'team2')}**"
+        )
+    embed.description = "\n".join(lines)
+    return embed
+
+
+def result_embed(
+    match: dict,
+    form: str | None = None,
+    standing: dict | None = None,
+) -> discord.Embed:
+    t1 = _team_name(match, "team1")
+    t2 = _team_name(match, "team2")
+    res = _result(match)
+
+    if res is True:
+        title, color = "🏆 Zwycięstwo PINDOLZ!", C_WIN
+    elif res is False:
+        title, color = "💔 Porażka PINDOLZ", C_LOSS
+    else:
+        title, color = "📊 Wynik meczu PINDOLZ", C_NEUTRAL
+
+    embed = _base(title, color, f"## {t1}  {_score_str(match)}  {t2}")
+    embed.add_field(name="📅 Data", value=match.get("matchDate") or "-", inline=True)
+    embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
+
+    if form:
+        embed.add_field(name="🔥 Forma (ost. 5)", value=_form_icons(form), inline=False)
+
+    if standing and standing.get("rank") is not None:
+        pts = standing.get("points")
+        embed.add_field(
+            name="📊 Pozycja w tabeli",
+            value=f"{_medal(standing.get('rank'))} **{standing.get('rank')}.** miejsce · **{pts if pts is not None else '–'}** pkt",
+            inline=False,
+        )
+    return embed
+
+
+# ---------- live ----------
+def live_embed(match: dict) -> discord.Embed:
+    t1 = _team_name(match, "team1")
+    t2 = _team_name(match, "team2")
+    current = match.get("currentMap") or {}
+    map_name = current.get("name") or "?"
+    map_score = current.get("score") or {}
+    s1 = map_score.get("team1", 0)
+    s2 = map_score.get("team2", 0)
+    series = match.get("seriesScore") or {}
+
+    embed = _base("🔴 LIVE · PINDOLZ gra teraz!", C_LOSS, f"## {t1}  vs  {t2}")
+    embed.add_field(name="🗺️ Mapa", value=map_name, inline=True)
+    embed.add_field(name="⚔️ Wynik mapy", value=f"**{s1}:{s2}**", inline=True)
+    if series and series.get("team1") is not None:
+        embed.add_field(
+            name="📈 Seria",
+            value=f"**{series.get('team1', 0)}:{series.get('team2', 0)}**",
+            inline=True,
+        )
+    embed.set_footer(text=match.get("division") or FOOTER)
+    return embed
+
+
+def match_started_embed(match: dict) -> discord.Embed:
+    embed = _base(
+        "🟢 Mecz właśnie się zaczął",
+        C_WIN,
+        f"## PINDOLZ  ⚔️  {_opponent(match)}",
+    )
+    embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
+    embed.add_field(name="🎯 Format", value=f"Bo{match.get('bestOf') or '?'}", inline=True)
+    return embed
+
+
+def match_ended_embed(
+    match: dict,
+    form: str | None = None,
+    standing: dict | None = None,
+) -> discord.Embed:
+    return result_embed(match, form=form, standing=standing)
+
+
+# ---------- tabela ----------
+def standings_embed(table: list[dict], division: str = "Starter Division 6") -> discord.Embed:
+    embed = _base(f"🏆 Tabela · {division}", C_TABLE)
+    if not table:
+        embed.description = "Brak danych tabeli."
+        return embed
+
+    lines = [f" {'#':>2} {'Drużyna':<14} {'W-L':>5} {'RD':>4} {'Pkt':>4}"]
+    lines.append("─" * 34)
+    for row in table[:16]:
+        rank = row.get("rank") or "?"
+        team = (row.get("team") or {}).get("name") or "???"
+        is_us = team.upper() == "PINDOLZ"
+        wl = f"{row.get('wins') or 0}-{row.get('losses') or 0}"
+        pts = row.get("points")
+        marker = "▶" if is_us else " "
+        lines.append(
+            f"{marker}{str(rank):>2} {team[:14]:<14} {wl:>5} "
+            f"{_signed(row.get('roundDifference')):>4} {pts if pts is not None else '–':>4}"
+        )
+
+    embed.description = "```\n" + "\n".join(lines) + "\n```"
+    embed.set_footer(text="▶ PINDOLZ • RD = różnica rund")
+    return embed
+
+
+# ---------- podsumowanie tygodnia ----------
+def weekly_summary_embed(
+    matches: list[dict],
+    wins: int,
+    losses: int,
+    standing: dict | None,
+) -> discord.Embed:
+    embed = _base("🗓️ Podsumowanie tygodnia · PINDOLZ", C_TEAM)
+    embed.add_field(name="🎮 Mecze", value=f"**{len(matches)}**", inline=True)
+    embed.add_field(name="⚖️ Bilans", value=f"**{wins}W – {losses}L**", inline=True)
+
+    if standing and standing.get("rank") is not None:
+        pts = standing.get("points")
+        embed.add_field(
+            name="📊 Pozycja",
+            value=f"{_medal(standing.get('rank'))} **{standing.get('rank')}.** · {pts if pts is not None else '–'} pkt",
+            inline=True,
+        )
+
+    if matches:
+        lines = [
+            f"{_icon(_result(m))} `{m.get('matchDate') or '?'}` "
+            f"{_team_name(m, 'team1')} {_score_str(m)} {_team_name(m, 'team2')}"
+            for m in matches[:10]
+        ]
+        embed.add_field(name="📜 Wyniki", value="\n".join(lines), inline=False)
+    else:
+        embed.description = "Brak meczów w tym tygodniu."
+    return embed
+
+
+# ---------- karta drużyny ----------
+def team_embed(
+    standing: dict | None,
+    history: list[dict],
+    upcoming: list[dict],
+    form: str | None,
+    table_size: int = 0,
+    division: str = "Starter Division 6",
+) -> discord.Embed:
+    embed = _base("🛡️ PINDOLZ", C_TEAM, f"**{division}**")
+
+    if standing:
+        rank = standing.get("rank")
+        wins = standing.get("wins") or 0
+        losses = standing.get("losses") or 0
+        pts = standing.get("points")
+        total = wins + losses
+        winrate = f"{round(wins / total * 100)}%" if total else "–"
+        rank_str = f"{_medal(rank)} **{rank}.**" + (f" / {table_size}" if table_size else "")
+
+        embed.add_field(name="📍 Miejsce", value=rank_str, inline=True)
+        embed.add_field(name="⭐ Punkty", value=f"**{pts if pts is not None else '–'}**", inline=True)
+        embed.add_field(name="📈 Winrate", value=f"**{winrate}**", inline=True)
+        embed.add_field(name="⚖️ Bilans", value=f"**{wins}W – {losses}L**", inline=True)
+        embed.add_field(name="🎯 Różnica rund", value=f"**{_signed(standing.get('roundDifference'))}**", inline=True)
+        embed.add_field(name="🎮 Mecze", value=f"**{total}**", inline=True)
+    else:
+        embed.add_field(name="📍 Tabela", value="Brak danych", inline=False)
+
+    embed.add_field(name="🔥 Forma (ost. 5)", value=_form_icons(form), inline=False)
+
+    if history:
+        last = history[0]
+        embed.add_field(
+            name="⏮️ Ostatni mecz",
+            value=(
+                f"{_icon(_result(last))} {_team_name(last, 'team1')} "
+                f"**{_score_str(last)}** {_team_name(last, 'team2')}"
+            ),
+            inline=False,
+        )
+
+    future = [m for m in upcoming if _match_dt(m)]
+    future.sort(key=lambda m: _match_dt(m))
+    if future:
+        nxt = future[0]
+        embed.add_field(
+            name="⏭️ Następny mecz",
+            value=f"vs **{_opponent(nxt)}**\n{_ts(nxt, 'F')} · {_ts(nxt, 'R')}",
+            inline=False,
+        )
+    return embed
