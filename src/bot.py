@@ -13,7 +13,6 @@ from src.client import StarterLeagueClient, PINDOLZ_TEAM_ID
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 TZ = ZoneInfo("Europe/Warsaw")
 
 # Godziny aktualizacji tabeli (Europe/Warsaw)
@@ -41,11 +40,10 @@ class PindolzBot(commands.Bot):
         self.cleanup_task.start()
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
-        if OWNER_ID and interaction.user.id == OWNER_ID:
-            return True
-        if interaction.guild and interaction.user.id == interaction.guild.owner_id:
-            return True
-        return False
+        """Tylko właściciel serwera."""
+        return bool(
+            interaction.guild and interaction.user.id == interaction.guild.owner_id
+        )
 
     async def get_channel_safe(self, channel_id: int | None):
         if not channel_id:
@@ -165,7 +163,6 @@ class PindolzBot(commands.Bot):
 
         now = datetime.now(TZ)
 
-        # --- wyniki ---
         for m in history:
             mid = m.get("id")
             if mid is None:
@@ -225,7 +222,6 @@ class PindolzBot(commands.Bot):
                 except Exception:
                     pass
 
-        # --- nadchodzące (24–48h) ---
         for m in upcoming:
             mid = m.get("id")
             if mid is None:
@@ -481,7 +477,9 @@ async def cmd_tabela(interaction: discord.Interaction):
 @app_commands.describe(kanal="Kanał na wyniki i nadchodzące mecze")
 async def cmd_setup(interaction: discord.Interaction, kanal: discord.TextChannel):
     if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel może to użyć.", ephemeral=True)
+        await interaction.response.send_message(
+            "Tylko właściciel serwera może to użyć.", ephemeral=True
+        )
         return
     db.set_config("main_channel_id", str(kanal.id))
     await interaction.response.send_message(
@@ -493,7 +491,9 @@ async def cmd_setup(interaction: discord.Interaction, kanal: discord.TextChannel
 @app_commands.describe(kanal="Kanał na powiadomienia live")
 async def cmd_setup_live(interaction: discord.Interaction, kanal: discord.TextChannel):
     if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel może to użyć.", ephemeral=True)
+        await interaction.response.send_message(
+            "Tylko właściciel serwera może to użyć.", ephemeral=True
+        )
         return
     db.set_config("live_channel_id", str(kanal.id))
     await interaction.response.send_message(
@@ -505,10 +505,11 @@ async def cmd_setup_live(interaction: discord.Interaction, kanal: discord.TextCh
 @app_commands.describe(kanal="Kanał na automatyczną tabelę")
 async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.TextChannel):
     if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel może to użyć.", ephemeral=True)
+        await interaction.response.send_message(
+            "Tylko właściciel serwera może to użyć.", ephemeral=True
+        )
         return
     db.set_config("table_channel_id", str(kanal.id))
-    # od razu wyślij pierwszą tabelę
     await interaction.response.defer(ephemeral=True)
     try:
         table = bot.api.get_division6_table()
