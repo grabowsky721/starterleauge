@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Any
 
 import requests
@@ -9,6 +10,7 @@ load_dotenv()
 API_BASE = "https://starterleague.pl/api/partners"
 PINDOLZ_TEAM_ID = 869
 DIVISION_6 = "Starter Division 6"
+MAX_PAGES = 30
 
 
 class StarterLeagueClient:
@@ -27,9 +29,19 @@ class StarterLeagueClient:
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         url = f"{API_BASE}{path}"
-        resp = self.session.get(url, params=params, timeout=12)
-        resp.raise_for_status()
-        return resp.json()
+        last_err: Exception | None = None
+        for attempt in range(2):
+            try:
+                resp = self.session.get(url, params=params, timeout=12)
+                resp.raise_for_status()
+                return resp.json()
+            except (requests.Timeout, requests.ConnectionError) as e:
+                last_err = e
+                if attempt == 0:
+                    time.sleep(0.8)
+                    continue
+                raise
+        raise last_err  # type: ignore
 
     def _is_pindolz(self, match: dict) -> bool:
         t1 = match.get("team1") or {}
@@ -46,7 +58,7 @@ class StarterLeagueClient:
     def _fetch_all_pages(self, path: str) -> list[dict]:
         items: list[dict] = []
         page = 1
-        while True:
+        while page <= MAX_PAGES:
             data = self._get(path, params={"page": page})
             page_items = data.get("items") or []
             items.extend(page_items)
@@ -87,7 +99,6 @@ class StarterLeagueClient:
         return []
 
     def get_pindolz_standing(self) -> dict | None:
-        """Zwraca wiersz tabeli PINDOLZ lub None."""
         table = self.get_division6_table()
         for row in table:
             team = row.get("team") or {}
@@ -96,7 +107,6 @@ class StarterLeagueClient:
         return None
 
     def get_form(self, history: list[dict] | None = None, limit: int = 5) -> str:
-        """Ostatnie wyniki jako string np. WWLWL (od najstarszego do najnowszego w oknie)."""
         if history is None:
             history = self.get_pindolz_history()
         letters: list[str] = []
@@ -106,7 +116,6 @@ class StarterLeagueClient:
                 letters.append("?")
                 continue
             letters.append("W" if winner == PINDOLZ_TEAM_ID else "L")
-        # history jest od najnowszych – odwróć żeby forma szła chronologicznie
         return "".join(reversed(letters))
 
     def did_pindolz_win(self, match: dict) -> bool | None:
