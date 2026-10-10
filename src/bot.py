@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
@@ -17,6 +18,25 @@ from src import db, embeds
 from src.client import StarterLeagueClient, PINDOLZ_TEAM_ID
 
 load_dotenv()
+
+
+def load_version() -> str:
+    """Czyta VERSION z katalogu projektu (obok src/)."""
+    candidates = [
+        Path(__file__).resolve().parent.parent / "VERSION",
+        Path("VERSION"),
+        Path("/home/container/VERSION"),
+    ]
+    for p in candidates:
+        try:
+            if p.is_file():
+                return p.read_text(encoding="utf-8").strip() or "unknown"
+        except Exception:
+            continue
+    return "unknown"
+
+
+BOT_VERSION = load_version()
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 TZ = ZoneInfo("Europe/Warsaw")
@@ -32,7 +52,6 @@ TABLE_UPDATE_TIMES = [
 LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
 
-# Opóźnienia soft-startu (sekundy od gotowości bota)
 START_DELAY_LIVE = 8
 START_DELAY_PREMATCH = 15
 START_DELAY_TABLE = 20
@@ -99,7 +118,6 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         await self.tree.sync()
-        # Taski startują z opóźnieniem – mniej skoku CPU/RAM na starcie
         asyncio.create_task(self._soft_start_tasks())
 
     async def _soft_start_tasks(self):
@@ -780,6 +798,23 @@ async def cmd_tabela(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="wersja", description="Aktualna wersja bota")
+async def cmd_wersja(interaction: discord.Interaction):
+    uptime = datetime.now(TZ) - bot.started_at
+    hours, rem = divmod(int(uptime.total_seconds()), 3600)
+    mins, secs = divmod(rem, 60)
+    uptime_str = f"{hours}h {mins}m {secs}s" if hours else f"{mins}m {secs}s"
+    emb = discord.Embed(
+        title="PINDOLZ Bot",
+        color=0x6366F1,
+        timestamp=datetime.now(TZ),
+    )
+    emb.add_field(name="Wersja", value=f"`{BOT_VERSION}`", inline=True)
+    emb.add_field(name="Uptime", value=uptime_str, inline=True)
+    emb.add_field(name="discord.py", value=f"`{discord.__version__}`", inline=True)
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
 @bot.tree.command(name="setup", description="Ustaw kanał główny (wyniki + nadchodzące)")
 @app_commands.describe(kanal="Kanał na wyniki i nadchodzące mecze")
 async def cmd_setup(interaction: discord.Interaction, kanal: discord.TextChannel):
@@ -845,6 +880,7 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
 @bot.event
 async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
+    print(f"Wersja: {BOT_VERSION}")
     print("Bot gotowy – taski wystartują stopniowo.")
 
 
