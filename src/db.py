@@ -59,6 +59,16 @@ def get_config(key: str, default: str | None = None) -> str | None:
         return row["value"] if row else default
 
 
+def get_config_int(key: str, default: int | None = None) -> int | None:
+    val = get_config(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def set_config(key: str, value: str | None) -> None:
     with _connect() as conn:
         if value is None:
@@ -72,7 +82,6 @@ def set_config(key: str, value: str | None) -> None:
 
 
 def upsert_match(match_id: int, **fields: Any) -> None:
-    """Wstaw lub zaktualizuj rekord meczu."""
     allowed = {
         "match_date", "match_time", "division", "opponent", "status",
         "score_team1", "score_team2", "winner_team_id", "updated_at",
@@ -125,7 +134,6 @@ def mark_finished(match_id: int, finished_at: str | None = None) -> None:
 
 
 def cleanup_old(days: int = 30) -> int:
-    """Usuń zakończone/anulowane mecze starsze niż `days` dni."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     with _connect() as conn:
         cur = conn.execute(

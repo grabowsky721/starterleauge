@@ -26,6 +26,29 @@ class StarterLeagueClient:
                 "Accept": "application/json",
             }
         )
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache_ttl = {
+            "live": 4,
+            "standings": 45,
+            "upcoming": 60,
+            "history": 90,
+        }
+
+    def _cache_get(self, key: str):
+        item = self._cache.get(key)
+        if not item:
+            return None
+        expires, value = item
+        if time.monotonic() > expires:
+            self._cache.pop(key, None)
+            return None
+        return value
+
+    def _cache_set(self, key: str, value: Any, ttl: float | None = None) -> Any:
+        if ttl is None:
+            ttl = self._cache_ttl.get(key, 30)
+        self._cache[key] = (time.monotonic() + ttl, value)
+        return value
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         url = f"{API_BASE}{path}"
@@ -48,13 +71,6 @@ class StarterLeagueClient:
         t2 = match.get("team2") or {}
         return t1.get("id") == PINDOLZ_TEAM_ID or t2.get("id") == PINDOLZ_TEAM_ID
 
-    def _opponent_name(self, match: dict) -> str:
-        t1 = match.get("team1") or {}
-        t2 = match.get("team2") or {}
-        if t1.get("id") == PINDOLZ_TEAM_ID:
-            return t2.get("name") or "???"
-        return t1.get("name") or "???"
-
     def _fetch_all_pages(self, path: str) -> list[dict]:
         items: list[dict] = []
         page = 1
@@ -72,31 +88,50 @@ class StarterLeagueClient:
         return self._get("/matches/live")
 
     def get_pindolz_upcoming(self) -> list[dict]:
-        return [m for m in self._fetch_all_pages("/matches/upcoming") if self._is_pindolz(m)]
+        cached = self._cache_get("upcoming")
+        if cached is not None:
+            return cached
+        data = [m for m in self._fetch_all_pages("/matches/upcoming") if self._is_pindolz(m)]
+        return self._cache_set("upcoming", data)
 
     def get_pindolz_history(self) -> list[dict]:
-        return [m for m in self._fetch_all_pages("/matches/history") if self._is_pindolz(m)]
+        cached = self._cache_get("history")
+        if cached is not None:
+            return cached
+        data = [m for m in self._fetch_all_pages("/matches/history") if self._is_pindolz(m)]
+        return self._cache_set("history", data)
 
     def get_pindolz_live(self) -> list[dict]:
+        cached = self._cache_get("live")
+        if cached is not None:
+            return cached
         data = self.get_live_raw()
         items = data.get("items") or []
-        return [m for m in items if self._is_pindolz(m)]
+        result = [m for m in items if self._is_pindolz(m)]
+        return self._cache_set("live", result)
 
     def get_standings(self, division: str | None = None) -> dict:
         params = {"division": division} if division else None
         return self._get("/standings", params=params)
 
     def get_division6_table(self) -> list[dict]:
+        cached = self._cache_get("standings")
+        if cached is not None:
+            return cached
         data = self.get_standings(DIVISION_6)
         divisions = data.get("divisions") or []
+        table: list[dict] = []
         for d in divisions:
             if d.get("division") == DIVISION_6:
-                return d.get("table") or []
-        for d in divisions:
-            name = (d.get("division") or "").lower()
-            if "division 6" in name or "division6" in name:
-                return d.get("table") or []
-        return []
+                table = d.get("table") or []
+                break
+        if not table:
+            for d in divisions:
+                name = (d.get("division") or "").lower()
+                if "division 6" in name or "division6" in name:
+                    table = d.get("table") or []
+                    break
+        return self._cache_set("standings", table)
 
     def get_pindolz_standing(self) -> dict | None:
         table = self.get_division6_table()
@@ -123,3 +158,10 @@ class StarterLeagueClient:
         if winner is None:
             return None
         return winner == PINDOLZ_TEAM_ID
+
+    def invalidate_cache(self, *keys: str) -> None:
+        if not keys:
+            self._cache.clear()
+            return
+        for k in keys:
+            self._cache.pop(k, None)
