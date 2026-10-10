@@ -28,6 +28,9 @@ TABLE_UPDATE_TIMES = [
     time(23, 0, tzinfo=TZ),
 ]
 
+LIVE_INTERVAL_IDLE = 10
+LIVE_INTERVAL_ACTIVE = 5
+
 
 # ---------- Przycisk Odśwież ----------
 class RefreshView(discord.ui.View):
@@ -104,7 +107,6 @@ class PindolzBot(commands.Bot):
         return (int(mid) if mid else None, int(cid) if cid else None)
 
     def _result_extras(self, match: dict | None = None):
-        """Forma + pozycja w tabeli do embedu wyniku."""
         form = None
         standing = None
         try:
@@ -156,7 +158,6 @@ class PindolzBot(commands.Bot):
         msg = await channel.send(embed=embed, view=view)
         return msg.id, channel.id  # type: ignore
 
-    # ---------- zmiana pozycji w tabeli ----------
     @staticmethod
     def _ranks_json(table: list[dict]) -> str:
         ranks = {}
@@ -168,7 +169,6 @@ class PindolzBot(commands.Bot):
         return json.dumps(ranks)
 
     def _rank_changes(self, table: list[dict]) -> dict[str, int]:
-        """Zmiana pozycji względem poprzedniej aktualizacji (dodatnia = awans)."""
         try:
             prev = json.loads(db.get_config("table_prev_ranks") or "{}")
         except Exception:
@@ -183,7 +183,6 @@ class PindolzBot(commands.Bot):
         return changes
 
     async def _react_result(self, ch_id: int | None, msg_id: int | None, match: dict):
-        """Reakcja pod wynikiem: 🎉 po wygranej, 😢 po porażce."""
         won = self.api.did_pindolz_win(match)
         if won is None or not ch_id or not msg_id:
             return
@@ -445,8 +444,8 @@ class PindolzBot(commands.Bot):
     async def before_prematch(self):
         await self.wait_until_ready()
 
-    # ---------- LIVE ----------
-    @tasks.loop(seconds=10)
+    # ---------- LIVE (5s gdy gra, 10s gdy nie) ----------
+    @tasks.loop(seconds=LIVE_INTERVAL_IDLE)
     async def live_check(self):
         await self._run_live_check()
 
@@ -457,12 +456,21 @@ class PindolzBot(commands.Bot):
     async def _run_live_check(self):
         channel = await self.get_channel_safe(self._live_channel_id())
         if not channel:
+            self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
             return
+
         try:
             lives = self.api.get_pindolz_live()
         except Exception as e:
             print(f"[live] API error: {e}")
+            self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
             return
+
+        # dynamiczny interwał
+        if lives:
+            self.live_check.change_interval(seconds=LIVE_INTERVAL_ACTIVE)
+        else:
+            self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
 
         current_ids = set()
         for m in lives:
@@ -513,6 +521,7 @@ class PindolzBot(commands.Bot):
                 continue
 
             match_data = None
+            history = []
             try:
                 history = self.api.get_pindolz_history()
                 for h in history:
@@ -520,10 +529,10 @@ class PindolzBot(commands.Bot):
                         match_data = h
                         break
             except Exception:
-                history = []
+                pass
 
             if match_data:
-                form = self.api.get_form(history if history else None, limit=5)
+                form = self.api.get_form(history, limit=5) if history else None
                 standing = None
                 try:
                     standing = self.api.get_pindolz_standing()
@@ -566,7 +575,6 @@ class PindolzBot(commands.Bot):
     # ---------- Podsumowanie tygodnia (niedziela 20:00) ----------
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
     async def weekly_summary(self):
-        # tylko niedziela
         if datetime.now(TZ).weekday() != 6:
             return
         channel = await self.get_channel_safe(self._main_channel_id())
@@ -699,56 +707,6 @@ async def cmd_tabela(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="team", description="Karta profilu drużyny PINDOLZ")
-async def cmd_team(interaction: discord.Interaction):
-    await interaction.response.defer()
-    try:
-        table = bot.api.get_division6_table()
-        history = bot.api.get_pindolz_history()
-        upcoming = bot.api.get_pindolz_upcoming()
-    except Exception as e:
-        await interaction.followup.send(f"Błąd API: {e}")
-        return
-    standing = None
-    for row in table:
-        team = row.get("team") or {}
-        if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
-            standing = row
-            break
-    form = bot.api.get_form(history, limit=5)
-    await interaction.followup.send(
-        embed=embeds.team_embed(standing, history, upcoming, form, table_size=len(table))
-    )
-
-
-@bot.tree.command(name="forma", description="Forma PINDOLZ z ostatnich 5 meczów")
-async def cmd_forma(interaction: discord.Interaction):
-    await interaction.response.defer()
-    try:
-        history = bot.api.get_pindolz_history()
-    except Exception as e:
-        await interaction.followup.send(f"Błąd API: {e}")
-        return
-    form = bot.api.get_form(history, limit=5)
-    await interaction.followup.send(embed=embeds.form_embed(form, history[:5]))
-
-
-@bot.tree.command(name="ping", description="Sprawdź, czy bot działa")
-async def cmd_ping(interaction: discord.Interaction):
-    latency = round(bot.latency * 1000)
-    delta = datetime.now(TZ) - bot.started_at
-    days, rem = divmod(int(delta.total_seconds()), 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = rem // 60
-    uptime = (f"{days}d " if days else "") + f"{hours}h {minutes}m"
-    await interaction.response.send_message(embed=embeds.ping_embed(latency, uptime))
-
-
-@bot.tree.command(name="pomoc", description="Lista komend bota")
-async def cmd_pomoc(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=embeds.help_embed())
-
-
 @bot.tree.command(name="setup", description="Ustaw kanał główny (wyniki + nadchodzące)")
 @app_commands.describe(kanal="Kanał na wyniki i nadchodzące mecze")
 async def cmd_setup(interaction: discord.Interaction, kanal: discord.TextChannel):
@@ -790,9 +748,7 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
     try:
         table = bot.api.get_division6_table()
         if table:
-            db.set_config("table_last_ranks", bot._ranks_json(table))
-            db.set_config("table_prev_ranks", None)
-            emb = embeds.standings_embed(table)
+            emb = embeds.standings_embed(table, changes=bot._rank_changes(table))
             msg = await kanal.send(embed=emb, view=RefreshView("tabela"))
             db.set_config("msg_table_id", str(msg.id))
             db.set_config("msg_table_ch", str(kanal.id))
@@ -817,14 +773,6 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
 async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
     print("Bot gotowy.")
-    if not bot._announced:
-        bot._announced = True
-        channel = await bot.get_channel_safe(bot._main_channel_id())
-        if channel:
-            try:
-                await channel.send(embed=embeds.online_embed(), delete_after=300)
-            except Exception as e:
-                print(f"[online] {e}")
 
 
 if __name__ == "__main__":
