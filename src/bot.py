@@ -16,6 +16,15 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 TZ = ZoneInfo("Europe/Warsaw")
 
+# Godziny aktualizacji tabeli (Europe/Warsaw)
+TABLE_UPDATE_TIMES = [
+    time(8, 0, tzinfo=TZ),
+    time(18, 0, tzinfo=TZ),
+    time(20, 0, tzinfo=TZ),
+    time(21, 30, tzinfo=TZ),
+    time(23, 0, tzinfo=TZ),
+]
+
 
 class PindolzBot(commands.Bot):
     def __init__(self):
@@ -28,6 +37,7 @@ class PindolzBot(commands.Bot):
         await self.tree.sync()
         self.daily_check.start()
         self.live_check.start()
+        self.table_update.start()
         self.cleanup_task.start()
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
@@ -52,6 +62,15 @@ class PindolzBot(commands.Bot):
     def _live_channel_id(self) -> int | None:
         val = db.get_config("live_channel_id")
         return int(val) if val else None
+
+    def _table_channel_id(self) -> int | None:
+        val = db.get_config("table_channel_id")
+        return int(val) if val else None
+
+    def _table_msg(self) -> tuple[int | None, int | None]:
+        mid = db.get_config("msg_table_id")
+        cid = db.get_config("msg_table_ch")
+        return (int(mid) if mid else None, int(cid) if cid else None)
 
     @staticmethod
     def _score_key(match: dict) -> str:
@@ -91,6 +110,38 @@ class PindolzBot(commands.Bot):
         msg = await channel.send(embed=embed)
         return msg.id, channel.id  # type: ignore
 
+    # ---------- TABELA Division 6 ----------
+    @tasks.loop(time=TABLE_UPDATE_TIMES)
+    async def table_update(self):
+        await self._run_table_update()
+
+    @table_update.before_loop
+    async def before_table(self):
+        await self.wait_until_ready()
+
+    async def _run_table_update(self):
+        channel = await self.get_channel_safe(self._table_channel_id())
+        if not channel:
+            return
+
+        try:
+            table = self.api.get_division6_table()
+        except Exception as e:
+            print(f"[table] API error: {e}")
+            return
+
+        if not table:
+            print("[table] pusta tabela – pomijam")
+            return
+
+        emb = embeds.standings_embed(table)
+        msg_id, ch_id = self._table_msg()
+
+        new_msg_id, new_ch_id = await self._edit_or_send(channel, emb, msg_id, ch_id)
+        db.set_config("msg_table_id", str(new_msg_id))
+        db.set_config("msg_table_ch", str(new_ch_id))
+        print(f"[table] zaktualizowano o {datetime.now(TZ).strftime('%H:%M')}")
+
     # ---------- DAILY: nadchodzące + wyniki ----------
     @tasks.loop(time=[time(9, 0, tzinfo=TZ), time(20, 0, tzinfo=TZ)])
     async def daily_check(self):
@@ -122,7 +173,6 @@ class PindolzBot(commands.Bot):
             row = db.get_match(mid)
             score = m.get("score") or {}
             if row and row.get("notified_result"):
-                # ewentualna korekta wyniku
                 old_s1, old_s2 = row.get("score_team1"), row.get("score_team2")
                 new_s1, new_s2 = score.get("team1"), score.get("team2")
                 if (old_s1, old_s2) != (new_s1, new_s2) and new_s1 is not None:
@@ -143,7 +193,6 @@ class PindolzBot(commands.Bot):
                     )
                 continue
 
-            # nowy wynik
             msg_id, ch_id = await self._edit_or_send(
                 channel, embeds.result_embed(m), None, None
             )
@@ -163,7 +212,6 @@ class PindolzBot(commands.Bot):
                 msg_result_ch=ch_id,
             )
 
-            # zaktualizuj też wiadomość LIVE jeśli była
             if row and row.get("msg_live_id"):
                 try:
                     live_ch = await self.get_channel_safe(row.get("msg_live_ch"))
@@ -186,11 +234,12 @@ class PindolzBot(commands.Bot):
             match_date = m.get("matchDate")
             match_time = (m.get("matchTime") or "00:00:00")[:8]
             try:
-                dt = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+                dt = datetime.strptime(
+                    f"{match_date} {match_time}", "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=TZ)
             except Exception:
                 dt = None
 
-            # tylko w oknie 48h
             if dt and not (now <= dt <= now + timedelta(hours=48)):
                 continue
 
@@ -198,7 +247,6 @@ class PindolzBot(commands.Bot):
             opponent = self._opponent(m)
 
             if row and row.get("notified_upcoming"):
-                # zmiana terminu / przeciwnika?
                 changed = (
                     row.get("match_date") != m.get("matchDate")
                     or (row.get("match_time") or "")[:5] != (m.get("matchTime") or "")[:5]
@@ -222,7 +270,6 @@ class PindolzBot(commands.Bot):
                     )
                 continue
 
-            # nowe powiadomienie
             msg_id, ch_id = await self._edit_or_send(
                 channel, embeds.single_upcoming_embed(m), None, None
             )
@@ -269,7 +316,6 @@ class PindolzBot(commands.Bot):
             key = self._score_key(m)
 
             if not row or not row.get("msg_live_id"):
-                # start meczu – jedna wiadomość (live embed)
                 emb = embeds.live_embed(m)
                 emb.title = "PINDOLZ gra teraz!"
                 msg = await channel.send(embed=emb)
@@ -287,7 +333,6 @@ class PindolzBot(commands.Bot):
                 )
                 continue
 
-            # aktualizacja tylko przy zmianie
             if key != row.get("live_score_key") or m.get("updatedAt") != row.get("updated_at"):
                 msg_id, ch_id = await self._edit_or_send(
                     channel,
@@ -304,14 +349,12 @@ class PindolzBot(commands.Bot):
                     msg_live_ch=ch_id,
                 )
 
-        # zakończone – zniknęły z live
         known_live = db.get_live_matches()
         for row in known_live:
             mid = row["match_id"]
             if mid in current_ids:
                 continue
 
-            # spróbuj pobrać wynik z historii
             match_data = None
             try:
                 history = self.api.get_pindolz_history()
@@ -323,15 +366,13 @@ class PindolzBot(commands.Bot):
                 pass
 
             if match_data:
-                emb = embeds.match_ended_embed(match_data)
                 score = match_data.get("score") or {}
                 await self._edit_or_send(
                     channel,
-                    emb,
+                    embeds.match_ended_embed(match_data),
                     row.get("msg_live_id"),
                     row.get("msg_live_ch"),
                 )
-                # wynik na kanał główny jeśli jeszcze nie
                 if not row.get("notified_result"):
                     main_ch = await self.get_channel_safe(self._main_channel_id())
                     if main_ch:
@@ -458,6 +499,39 @@ async def cmd_setup_live(interaction: discord.Interaction, kanal: discord.TextCh
     await interaction.response.send_message(
         f"Kanał live ustawiony na {kanal.mention}", ephemeral=True
     )
+
+
+@bot.tree.command(name="setup-tabela", description="Ustaw kanał tabeli Division 6")
+@app_commands.describe(kanal="Kanał na automatyczną tabelę")
+async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.TextChannel):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel może to użyć.", ephemeral=True)
+        return
+    db.set_config("table_channel_id", str(kanal.id))
+    # od razu wyślij pierwszą tabelę
+    await interaction.response.defer(ephemeral=True)
+    try:
+        table = bot.api.get_division6_table()
+        if table:
+            emb = embeds.standings_embed(table)
+            msg = await kanal.send(embed=emb)
+            db.set_config("msg_table_id", str(msg.id))
+            db.set_config("msg_table_ch", str(kanal.id))
+            await interaction.followup.send(
+                f"Kanał tabeli ustawiony na {kanal.mention}\n"
+                f"Tabela będzie aktualizowana o: **08:00, 18:00, 20:00, 21:30, 23:00**",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"Kanał ustawiony na {kanal.mention}, ale tabela jest pusta (API).",
+                ephemeral=True,
+            )
+    except Exception as e:
+        await interaction.followup.send(
+            f"Kanał ustawiony, ale nie udało się pobrać tabeli: {e}",
+            ephemeral=True,
+        )
 
 
 @bot.event
