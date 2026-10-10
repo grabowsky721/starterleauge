@@ -65,6 +65,20 @@ def _result(match: dict) -> bool | None:
     return winner == PINDOLZ_ID
 
 
+def _is_walkover(match: dict) -> bool:
+    for key in ("isWalkover", "walkover", "isForfeit", "forfeit", "wo"):
+        val = match.get(key)
+        if val is True or (isinstance(val, str) and val.lower() in ("true", "1", "yes", "wo")):
+            return True
+    status = (match.get("status") or match.get("resultType") or "").lower()
+    if "walkover" in status or status in ("wo", "forfeit"):
+        return True
+    note = str(match.get("note") or match.get("comment") or "").lower()
+    if "walkover" in note or "walk over" in note or note == "wo":
+        return True
+    return False
+
+
 def _icon(result: bool | None) -> str:
     return {True: "🟩", False: "🟥", None: "⬜"}[result]
 
@@ -202,13 +216,23 @@ def result_embed(
     t1 = _team_name(match, "team1")
     t2 = _team_name(match, "team2")
     res = _result(match)
-    if res is True:
+    wo = _is_walkover(match)
+    if wo and res is True:
+        title, color = "🏳️ Walkower · zwycięstwo PINDOLZ", C_WIN
+    elif wo and res is False:
+        title, color = "🏳️ Walkower · porażka PINDOLZ", C_LOSS
+    elif wo:
+        title, color = "🏳️ Walkower", C_NEUTRAL
+    elif res is True:
         title, color = "🏆 Zwycięstwo PINDOLZ!", C_WIN
     elif res is False:
         title, color = "💔 Porażka PINDOLZ", C_LOSS
     else:
         title, color = "📊 Wynik meczu PINDOLZ", C_NEUTRAL
-    embed = _base(title, color, f"## {t1}  {_score_str(match)}  {t2}")
+    desc = f"## {t1}  {_score_str(match)}  {t2}"
+    if wo:
+        desc += "\n*Mecz rozstrzygnięty walkowerem*"
+    embed = _base(title, color, desc)
     embed.add_field(name="📅 Data", value=match.get("matchDate") or "-", inline=True)
     embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
     if form:
@@ -267,6 +291,22 @@ def match_ended_embed(
     return result_embed(match, form=form, standing=standing)
 
 
+def schedule_changed_embed(match: dict, old_date: str | None, old_time: str | None) -> discord.Embed:
+    opponent = _opponent(match)
+    old_t = (old_time or "")[:5] if old_time else "?"
+    old_d = old_date or "?"
+    embed = _base(
+        "📅 Zmiana terminu meczu",
+        C_UPCOMING,
+        f"## PINDOLZ  ⚔️  {opponent}",
+    )
+    embed.add_field(name="Było", value=f"`{old_d} {old_t}`", inline=True)
+    embed.add_field(name="Jest", value=f"{_ts(match, 'F')}\n{_ts(match, 'R')}", inline=True)
+    embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=False)
+    _add_links(embed)
+    return embed
+
+
 def standings_embed(
     table: list[dict],
     division: str = "Starter Division 6",
@@ -292,8 +332,9 @@ def standings_embed(
                 delta = f" ▲{d}"
             elif d < 0:
                 delta = f" ▼{abs(d)}"
+        rank_label = _medal(rank) if isinstance(rank, int) else f"`{rank}.`"
         lines.append(
-            f"{_medal(rank) if isinstance(rank, int) else f'`{rank}.'`} {name}  ·  "
+            f"{rank_label} {name}  ·  "
             f"{w}W {l}L  ·  RD {rd if rd is not None else '–'}  ·  "
             f"**{pts if pts is not None else '–'} pkt**{delta}"
         )
@@ -326,4 +367,58 @@ def weekly_summary_embed(
     else:
         embed.description = "Brak meczów w tym tygodniu."
     _add_links(embed)
+    return embed
+
+
+def restart_embed(version: str, main_id: int | None, live_id: int | None, table_id: int | None) -> discord.Embed:
+    def ch(cid):
+        return f"<#{cid}>" if cid else "—"
+    embed = _base("✅ Bot online", C_TABLE, f"Wersja **`{version}`** · taski startują stopniowo.")
+    embed.add_field(
+        name="Kanały",
+        value=f"Główny: {ch(main_id)}\nLIVE: {ch(live_id)}\nTabela: {ch(table_id)}",
+        inline=False,
+    )
+    embed.set_footer(text="Ta wiadomość zniknie za 10 minut")
+    return embed
+
+
+def help_embed() -> discord.Embed:
+    embed = _base("📖 Komendy PINDOLZ bota", C_INFO)
+    embed.add_field(
+        name="📊 Mecze i tabela",
+        value=(
+            "`/pindolz` · najbliższe i ostatnie\n"
+            "`/nadchodzace` · nadchodzące\n"
+            "`/wyniki` · ostatnie wyniki\n"
+            "`/live` · czy gra teraz\n"
+            "`/tabela` · Division 6\n"
+            "`/wersja` · wersja bota\n"
+            "`/status` · API i kanały\n"
+            "`/pomoc` · ta lista"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⚙️ Dla właściciela",
+        value=(
+            "`/setup` · kanał główny\n"
+            "`/setup-live` · kanał LIVE\n"
+            "`/setup-tabela` · kanał tabeli\n"
+            "`/setup-all` · wszystkie kanały naraz"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🤖 Automatycznie",
+        value=(
+            "⏰ przypomnienie 30 min przed meczem\n"
+            "🔴 LIVE co 5–10 s + przycisk kanału\n"
+            "📅 zmiana terminu meczu\n"
+            "🏳️ wynik walkowerem (osobny styl)\n"
+            "🏆 tabela: 08:00, 18:00, 20:00, 21:30, 23:00\n"
+            "🗓️ podsumowanie tygodnia (niedziela 20:00)"
+        ),
+        inline=False,
+    )
     return embed
