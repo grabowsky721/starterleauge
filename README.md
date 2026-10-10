@@ -5,6 +5,8 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** w lidze [StarterLeague](
 - Terminarz i wyniki
 - LIVE co 10 sekund (edycja tej samej wiadomości)
 - Automatyczna tabela **Starter Division 6**
+- Forma, pozycja w tabeli, podsumowanie tygodnia
+- Przycisk **Odśwież** przy tabeli i wynikach
 - SQLite – pamięta stan po restarcie
 
 ---
@@ -15,9 +17,9 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** w lidze [StarterLeague](
 |---------|------|-----|
 | `/pindolz` | Najbliższe + ostatnie mecze | wszyscy |
 | `/live` | Czy PINDOLZ gra teraz | wszyscy |
-| `/wyniki` | Ostatnie wyniki | wszyscy |
+| `/wyniki` | Ostatnie wyniki (+ przycisk Odśwież) | wszyscy |
 | `/nadchodzace` | Tylko przyszłe mecze | wszyscy |
-| `/tabela` | Tabela Starter Division 6 | wszyscy |
+| `/tabela` | Tabela Starter Division 6 (+ przycisk Odśwież) | wszyscy |
 | `/setup` | Kanał główny (wyniki + nadchodzące) | właściciel serwera |
 | `/setup-live` | Kanał LIVE | właściciel serwera |
 | `/setup-tabela` | Kanał tabeli Division 6 | właściciel serwera |
@@ -31,11 +33,19 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** w lidze [StarterLeague](
 | Nowe wyniki + nadchodzące (24–48h) | **09:00** i **20:00** | główny |
 | LIVE – start / wynik mapy / koniec | co **10 sekund** | live |
 | Tabela Division 6 | **08:00, 18:00, 20:00, 21:30, 23:00** | tabela |
+| Podsumowanie tygodnia | **niedziela 20:00** | główny |
 | Cleanup starych rekordów | **04:00** | – |
 
 Wszystkie godziny w strefie **Europe/Warsaw**.
 
 Bot **edytuje** istniejące wiadomości zamiast spamować nowymi.
+
+### Wynik meczu zawiera dodatkowo:
+- **Formę** ostatnich 5 meczów (np. `WWLWL`)
+- **Pozycję w tabeli** Division 6 (miejsce + punkty)
+
+### Podsumowanie tygodnia:
+- liczba meczów, bilans W–L, pozycja, lista wyników z ostatnich 7 dni
 
 ---
 
@@ -73,8 +83,6 @@ DISCORD_BOT_TOKEN=twoj_token_bota
 STARTERLEAGUE_API_TOKEN=slp_twoj_token
 ```
 
-Sklonuj repo i uruchom:
-
 ```bash
 git clone https://github.com/grabowsky721/starterleauge.git
 cd starterleauge
@@ -98,8 +106,6 @@ Po starcie bota (jako **właściciel serwera**):
 /setup-tabela #kanał-tabela
 ```
 
-`/setup-tabela` od razu wysyła aktualną tabelę i od tej pory aktualizuje ją o wyznaczonych godzinach.
-
 ---
 
 ## Struktura projektu
@@ -109,24 +115,14 @@ Po starcie bota (jako **właściciel serwera**):
 ├── requirements.txt
 ├── README.md
 └── src/
-    ├── bot.py       # bot, komendy, schedulery
+    ├── bot.py       # bot, komendy, schedulery, przycisk Odśwież
     ├── client.py    # Partner API StarterLeague
-    ├── db.py        # SQLite (mecze, config, ID wiadomości)
+    ├── db.py        # SQLite
     ├── embeds.py    # wygląd wiadomości
     └── main.py      # stary CLI (opcjonalny)
 ```
 
-Dane (SQLite + config) zapisują się w katalogu `data/`.
-
----
-
-## Zachowanie powiadomień
-
-- **Nadchodzące** – tylko mecze w oknie 24–48h, jedno powiadomienie na mecz; przy zmianie terminu edytuje istniejącą wiadomość
-- **Wyniki** – każdy wynik tylko raz; korekta wyniku = edycja wiadomości
-- **LIVE** – jedna wiadomość na mecz; aktualizacja wyniku mapy przez edycję; po końcu ta sama wiadomość dostaje finalny wynik
-- **Tabela** – jedna wiadomość na kanale, edytowana 5× dziennie
-- Po restarcie bot odczytuje ID wiadomości z bazy i kontynuuje edycję
+Dane zapisują się w katalogu `data/`.
 
 ---
 

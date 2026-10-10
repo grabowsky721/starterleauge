@@ -75,15 +75,42 @@ class StarterLeagueClient:
         return self._get("/standings", params=params)
 
     def get_division6_table(self) -> list[dict]:
-        """Tabela Starter Division 6."""
         data = self.get_standings(DIVISION_6)
         divisions = data.get("divisions") or []
         for d in divisions:
             if d.get("division") == DIVISION_6:
                 return d.get("table") or []
-        # fallback – szukaj po fragmencie nazwy
         for d in divisions:
             name = (d.get("division") or "").lower()
             if "division 6" in name or "division6" in name:
                 return d.get("table") or []
         return []
+
+    def get_pindolz_standing(self) -> dict | None:
+        """Zwraca wiersz tabeli PINDOLZ lub None."""
+        table = self.get_division6_table()
+        for row in table:
+            team = row.get("team") or {}
+            if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
+                return row
+        return None
+
+    def get_form(self, history: list[dict] | None = None, limit: int = 5) -> str:
+        """Ostatnie wyniki jako string np. WWLWL (od najstarszego do najnowszego w oknie)."""
+        if history is None:
+            history = self.get_pindolz_history()
+        letters: list[str] = []
+        for m in history[:limit]:
+            winner = m.get("winnerTeamId")
+            if winner is None:
+                letters.append("?")
+                continue
+            letters.append("W" if winner == PINDOLZ_TEAM_ID else "L")
+        # history jest od najnowszych – odwróć żeby forma szła chronologicznie
+        return "".join(reversed(letters))
+
+    def did_pindolz_win(self, match: dict) -> bool | None:
+        winner = match.get("winnerTeamId")
+        if winner is None:
+            return None
+        return winner == PINDOLZ_TEAM_ID

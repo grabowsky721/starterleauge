@@ -26,7 +26,6 @@ def _opponent(match: dict) -> str:
         return t2.get("name") or "???"
     if t2.get("name", "").upper() == "PINDOLZ":
         return t1.get("name") or "???"
-    # fallback po id
     if t1.get("id") == 869:
         return t2.get("name") or "???"
     return t1.get("name") or "???"
@@ -103,7 +102,11 @@ def history_embed(matches: list[dict], limit: int = 8) -> discord.Embed:
     return embed
 
 
-def result_embed(match: dict) -> discord.Embed:
+def result_embed(
+    match: dict,
+    form: str | None = None,
+    standing: dict | None = None,
+) -> discord.Embed:
     t1 = _team_name(match, "team1")
     t2 = _team_name(match, "team2")
     score = _score_str(match)
@@ -123,6 +126,20 @@ def result_embed(match: dict) -> discord.Embed:
     )
     embed.add_field(name="Data", value=match.get("matchDate") or "-", inline=True)
     embed.add_field(name="Dywizja", value=match.get("division") or "-", inline=True)
+
+    if form:
+        embed.add_field(name="Forma (ost. 5)", value=f"`{form}`", inline=True)
+
+    if standing:
+        rank = standing.get("rank")
+        pts = standing.get("points")
+        if rank is not None:
+            embed.add_field(
+                name="Pozycja w tabeli",
+                value=f"**{rank}.** miejsce · **{pts if pts is not None else '–'}** pkt",
+                inline=False,
+            )
+
     return embed
 
 
@@ -163,8 +180,12 @@ def match_started_embed(match: dict) -> discord.Embed:
     return embed
 
 
-def match_ended_embed(match: dict) -> discord.Embed:
-    return result_embed(match)
+def match_ended_embed(
+    match: dict,
+    form: str | None = None,
+    standing: dict | None = None,
+) -> discord.Embed:
+    return result_embed(match, form=form, standing=standing)
 
 
 def standings_embed(table: list[dict], division: str = "Starter Division 6") -> discord.Embed:
@@ -182,19 +203,58 @@ def standings_embed(table: list[dict], division: str = "Starter Division 6") -> 
         rank = row.get("rank") or "?"
         team = (row.get("team") or {}).get("name") or "???"
         pts = row.get("points")
-        mp = row.get("matchesPlayed")
         w = row.get("wins")
         l = row.get("losses")
         rd = row.get("roundDifference")
         form = row.get("recentForm") or []
         form_str = "".join(form[-5:]) if form else ""
 
-        # podświetl PINDOLZ
         name = f"**{team}**" if team.upper() == "PINDOLZ" else team
-        line = f"`{rank:>2}.` {name}  ·  {w or 0}W {l or 0}L  ·  RD {rd if rd is not None else '–'}  ·  **{pts if pts is not None else '–'} pkt**"
+        line = (
+            f"`{rank:>2}.` {name}  ·  {w or 0}W {l or 0}L  ·  "
+            f"RD {rd if rd is not None else '–'}  ·  **{pts if pts is not None else '–'} pkt**"
+        )
         if form_str:
             line += f"  ·  {form_str}"
         lines.append(line)
 
     embed.description = "\n".join(lines)
+    return embed
+
+
+def weekly_summary_embed(
+    matches: list[dict],
+    wins: int,
+    losses: int,
+    standing: dict | None,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title="Podsumowanie tygodnia · PINDOLZ",
+        color=0x6366F1,
+        timestamp=datetime.now(TZ),
+    )
+    embed.add_field(name="Mecze", value=str(len(matches)), inline=True)
+    embed.add_field(name="Bilans", value=f"**{wins}W – {losses}L**", inline=True)
+
+    if standing:
+        rank = standing.get("rank")
+        pts = standing.get("points")
+        embed.add_field(
+            name="Pozycja",
+            value=f"**{rank}.** · {pts if pts is not None else '–'} pkt",
+            inline=True,
+        )
+
+    if matches:
+        lines = []
+        for m in matches[:10]:
+            t1 = _team_name(m, "team1")
+            t2 = _team_name(m, "team2")
+            score = _score_str(m)
+            date = m.get("matchDate") or "?"
+            lines.append(f"`{date}` {t1} {score} {t2}")
+        embed.add_field(name="Wyniki", value="\n".join(lines), inline=False)
+    else:
+        embed.description = "Brak meczów w tym tygodniu."
+
     return embed
