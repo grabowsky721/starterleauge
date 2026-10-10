@@ -48,12 +48,13 @@ TABLE_UPDATE_TIMES = [
 ]
 LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
-START_DELAY_LIVE = 8
-START_DELAY_PREMATCH = 15
-START_DELAY_TABLE = 20
-START_DELAY_DAILY = 25
-START_DELAY_WEEKLY = 30
-START_DELAY_CLEANUP = 35
+# Soft-start rozłożony na ~1 min 30 s
+START_DELAY_LIVE = 15
+START_DELAY_PREMATCH = 30
+START_DELAY_TABLE = 45
+START_DELAY_DAILY = 60
+START_DELAY_WEEKLY = 75
+START_DELAY_CLEANUP = 90
 
 
 class RefreshTabelaView(discord.ui.View):
@@ -117,7 +118,7 @@ class PindolzBot(commands.Bot):
 
     async def _soft_start_tasks(self):
         await self.wait_until_ready()
-        print("[start] soft-start tasków...")
+        print("[start] soft-start tasków (~1 min 30 s)...")
         await asyncio.sleep(START_DELAY_LIVE)
         if not self.live_check.is_running():
             self.live_check.start()
@@ -726,7 +727,7 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
 async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
     print(f"Wersja: {BOT_VERSION}")
-    print("Bot gotowy – taski wystartują stopniowo.")
+    print("Bot gotowy – taski wystartują stopniowo (~1 min 30 s).")
     if bot._announced:
         return
     bot._announced = True
