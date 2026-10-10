@@ -261,14 +261,19 @@ def match_ended_embed(
 
 
 # ---------- tabela ----------
-def standings_embed(table: list[dict], division: str = "Starter Division 6") -> discord.Embed:
+def standings_embed(
+    table: list[dict],
+    division: str = "Starter Division 6",
+    changes: dict | None = None,
+) -> discord.Embed:
     embed = _base(f"🏆 Tabela · {division}", C_TABLE)
     if not table:
         embed.description = "Brak danych tabeli."
         return embed
 
-    lines = [f" {'#':>2} {'Drużyna':<14} {'W-L':>5} {'RD':>4} {'Pkt':>4}"]
-    lines.append("─" * 34)
+    changes = changes or {}
+    lines = [f" {'#':>2}  {'Drużyna':<14} {'W-L':>5} {'RD':>4} {'Pkt':>4}"]
+    lines.append("─" * 35)
     for row in table[:16]:
         rank = row.get("rank") or "?"
         team = (row.get("team") or {}).get("name") or "???"
@@ -276,13 +281,15 @@ def standings_embed(table: list[dict], division: str = "Starter Division 6") -> 
         wl = f"{row.get('wins') or 0}-{row.get('losses') or 0}"
         pts = row.get("points")
         marker = "▶" if is_us else " "
+        delta = changes.get(team.upper(), 0)
+        arrow = "▲" if delta > 0 else "▼" if delta < 0 else " "
         lines.append(
-            f"{marker}{str(rank):>2} {team[:14]:<14} {wl:>5} "
+            f"{marker}{str(rank):>2}{arrow} {team[:14]:<14} {wl:>5} "
             f"{_signed(row.get('roundDifference')):>4} {pts if pts is not None else '–':>4}"
         )
 
     embed.description = "```\n" + "\n".join(lines) + "\n```"
-    embed.set_footer(text="▶ PINDOLZ • RD = różnica rund")
+    embed.set_footer(text="▶ PINDOLZ • ▲▼ zmiana pozycji • RD = różnica rund")
     return embed
 
 
@@ -368,4 +375,88 @@ def team_embed(
             value=f"vs **{_opponent(nxt)}**\n{_ts(nxt, 'F')} · {_ts(nxt, 'R')}",
             inline=False,
         )
+    return embed
+
+
+# ---------- forma ----------
+def form_embed(form: str | None, matches: list[dict]) -> discord.Embed:
+    wins = (form or "").count("W")
+    losses = (form or "").count("L")
+    if wins > losses:
+        color = C_WIN
+    elif losses > wins:
+        color = C_LOSS
+    else:
+        color = C_NEUTRAL
+
+    embed = _base("🔥 Forma PINDOLZ", color)
+    if not form:
+        embed.description = "Brak rozegranych meczów."
+        return embed
+
+    embed.description = f"## {_form_icons(form)}\n**{wins}W – {losses}L** w ostatnich {len(form)} meczach"
+    if matches:
+        lines = [
+            f"{_icon(_result(m))} `{m.get('matchDate') or '?'}` "
+            f"{_team_name(m, 'team1')} **{_score_str(m)}** {_team_name(m, 'team2')}"
+            for m in matches[:5]
+        ]
+        embed.add_field(name="📜 Ostatnie mecze", value="\n".join(lines), inline=False)
+    return embed
+
+
+# ---------- ping / pomoc / online ----------
+def ping_embed(latency_ms: int, uptime: str) -> discord.Embed:
+    embed = _base("🏓 Pong!", C_TABLE)
+    embed.add_field(name="📶 Opóźnienie", value=f"**{latency_ms} ms**", inline=True)
+    embed.add_field(name="⏱️ Działa od", value=f"**{uptime}**", inline=True)
+    embed.add_field(name="✅ Status", value="Bot działa", inline=True)
+    return embed
+
+
+def online_embed() -> discord.Embed:
+    embed = _base("✅ Bot online", C_TABLE, "PINDOLZ bot właśnie wystartował i działa.")
+    embed.set_footer(text="Ta wiadomość zniknie za 5 minut")
+    return embed
+
+
+def help_embed() -> discord.Embed:
+    embed = _base("📖 Komendy PINDOLZ bota", C_INFO)
+    embed.add_field(
+        name="📊 Mecze i tabela",
+        value=(
+            "`/pindolz` · najbliższe i ostatnie mecze\n"
+            "`/nadchodzace` · nadchodzące mecze\n"
+            "`/wyniki` · ostatnie wyniki\n"
+            "`/live` · czy PINDOLZ gra teraz\n"
+            "`/tabela` · tabela Division 6\n"
+            "`/team` · karta drużyny\n"
+            "`/forma` · forma z ostatnich 5 meczów"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🛠️ Inne",
+        value="`/ping` · czy bot działa\n`/pomoc` · ta lista",
+        inline=False,
+    )
+    embed.add_field(
+        name="⚙️ Dla właściciela serwera",
+        value=(
+            "`/setup` · kanał wyników i przypomnień\n"
+            "`/setup-live` · kanał LIVE\n"
+            "`/setup-tabela` · kanał tabeli"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🤖 Automatycznie",
+        value=(
+            "⏰ przypomnienie 30 min przed meczem\n"
+            "🔴 wyniki na żywo\n"
+            "🏆 tabela o 08:00, 18:00, 20:00, 21:30, 23:00\n"
+            "🗓️ podsumowanie tygodnia w niedzielę o 20:00"
+        ),
+        inline=False,
+    )
     return embed
