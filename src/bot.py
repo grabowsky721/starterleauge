@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import discord
@@ -99,6 +100,106 @@ class LiveChannelView(discord.ui.View):
         self.add_item(discord.ui.Button(label="Kanał LIVE", style=discord.ButtonStyle.link, url=url))
 
 
+# ---------- Włączanie / wyłączanie funkcji (/ustawienia) ----------
+FEATURES = {
+    "prematch": ("Przypomnienia", "⏰ Przypomnienie 30 min przed meczem na kanale głównym"),
+    "reactions": ("Reakcje", "🎉 Reakcje 🎉/😢 pod wynikiem"),
+    "status": ("Status", "🟢 Status bota (odliczanie, seria, LIVE)"),
+    "live": ("LIVE", "🔴 Relacja LIVE na kanale LIVE"),
+    "thread": ("Wątek LIVE", "🧵 Wątek z przebiegiem meczu pod kartą LIVE"),
+    "polls": ("Ankiety", "🗳️ Ankieta „Kto może grać?”"),
+    "rank": ("Awans/spadek", "📈 Powiadomienie o zmianie miejsca w tabeli"),
+    "alerts": ("Alerty API", "🚨 Wiadomość prywatna o awarii API"),
+}
+
+
+def feature_on(name: str) -> bool:
+    return db.get_config(f"feat_{name}") != "0"
+
+
+def settings_embed() -> discord.Embed:
+    lines = [f"{'✅' if feature_on(k) else '❌'} {desc}" for k, (_, desc) in FEATURES.items()]
+    emb = embeds._base("⚙️ Ustawienia bota", embeds.C_INFO, "\n".join(lines))
+    emb.set_footer(text="Kliknij przycisk, aby włączyć lub wyłączyć funkcję")
+    return emb
+
+
+class FeatureButton(discord.ui.Button):
+    def __init__(self, key: str):
+        on = feature_on(key)
+        super().__init__(
+            label=f"{'✅' if on else '❌'} {FEATURES[key][0]}",
+            style=discord.ButtonStyle.success if on else discord.ButtonStyle.danger,
+        )
+        self.key = key
+
+    async def callback(self, interaction: discord.Interaction):
+        if not bot.is_owner(interaction):
+            await interaction.response.send_message("Tylko właściciel serwera może to zmienić.", ephemeral=True)
+            return
+        db.set_config(f"feat_{self.key}", "0" if feature_on(self.key) else "1")
+        await interaction.response.edit_message(embed=settings_embed(), view=SettingsView())
+
+
+class SettingsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+        for key in FEATURES:
+            self.add_item(FeatureButton(key))
+
+
+# ---------- Przycisk „Przypomnij mi” ----------
+class RemindButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_remind:(?P<mid>\d+)"):
+    def __init__(self, mid: int):
+        super().__init__(
+            discord.ui.Button(label="Przypomnij mi", emoji="🔔", style=discord.ButtonStyle.primary, custom_id=f"pindolz_remind:{mid}")
+        )
+        self.mid = mid
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["mid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        await bot.toggle_reminder(interaction, self.mid)
+
+
+def remind_view(mid: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(RemindButton(mid))
+    return view
+
+
+# ---------- Przyciski ankiety dostępności ----------
+POLL_BUTTONS = {
+    "yes": ("Mogę", "✅", discord.ButtonStyle.success),
+    "no": ("Nie mogę", "❌", discord.ButtonStyle.danger),
+    "maybe": ("Może", "❔", discord.ButtonStyle.secondary),
+}
+
+
+class PollButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_poll:(?P<mid>\d+):(?P<vote>yes|no|maybe)"):
+    def __init__(self, mid: int, vote: str):
+        label, emoji, style = POLL_BUTTONS[vote]
+        super().__init__(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"pindolz_poll:{mid}:{vote}"))
+        self.mid = mid
+        self.vote = vote
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["mid"]), match["vote"])
+
+    async def callback(self, interaction: discord.Interaction):
+        await bot.handle_poll_vote(interaction, self.mid, self.vote)
+
+
+def poll_view(mid: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    for vote in POLL_BUTTONS:
+        view.add_item(PollButton(mid, vote))
+    return view
+
+
 class PindolzBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -110,11 +211,17 @@ class PindolzBot(commands.Bot):
         self._live_errors = 0
         self._status_idx = 0
         self._status_current = None
+        self._api_fail = 0
+        self._api_alerted = False
         db.init_db()
 
     async def setup_hook(self):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
+        try:
+            self.add_dynamic_items(RemindButton, PollButton)
+        except Exception as e:
+            print(f"[start] dynamic items: {e}")
         await self.tree.sync()
         asyncio.create_task(self._soft_start_tasks())
 
@@ -148,6 +255,12 @@ class PindolzBot(commands.Bot):
         if not self.status_loop.is_running():
             self.status_loop.start()
             print("[start] status_loop")
+        if not self.poll_check.is_running():
+            self.poll_check.start()
+            print("[start] poll_check")
+        if not self.api_watch.is_running():
+            self.api_watch.start()
+            print("[start] api_watch")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         return bool(interaction.guild and interaction.user.id == interaction.guild.owner_id)
@@ -224,6 +337,8 @@ class PindolzBot(commands.Bot):
         return changes
 
     async def _react_result(self, ch_id, msg_id, match):
+        if not feature_on("reactions"):
+            return
         won = self.api.did_pindolz_win(match)
         if won is None or not ch_id or not msg_id:
             return
@@ -265,6 +380,17 @@ class PindolzBot(commands.Bot):
         new_msg_id, new_ch_id = await self._edit_or_send(channel, emb, msg_id, ch_id, view=refresh_view("tabela"))
         db.set_config("msg_table_id", str(new_msg_id))
         db.set_config("msg_table_ch", str(new_ch_id))
+        if feature_on("rank"):
+            d = changes.get("PINDOLZ", 0)
+            if d:
+                prow = next((r for r in table if ((r.get("team") or {}).get("name") or "").upper() == "PINDOLZ"), None)
+                new_rank = prow.get("rank") if prow else None
+                main_ch = await self.get_channel_safe(self._main_channel_id())
+                if main_ch and isinstance(new_rank, int):
+                    try:
+                        await main_ch.send(embed=embeds.rank_change_embed(new_rank + d, new_rank, prow.get("points")))
+                    except Exception as e:
+                        print(f"[rank] send error: {e}")
         print(f"[table] zaktualizowano o {datetime.now(TZ).strftime('%H:%M')}")
 
     @tasks.loop(time=[time(9, 0, tzinfo=TZ), time(20, 0, tzinfo=TZ)])
@@ -344,7 +470,7 @@ class PindolzBot(commands.Bot):
                 date_changed = row.get("match_date") != m.get("matchDate") or (row.get("match_time") or "")[:5] != (m.get("matchTime") or "")[:5]
                 opp_changed = row.get("opponent") != opponent
                 if date_changed or opp_changed:
-                    msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), row.get("msg_upcoming_id"), row.get("msg_upcoming_ch"))
+                    msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), row.get("msg_upcoming_id"), row.get("msg_upcoming_ch"), view=remind_view(mid))
                     if date_changed:
                         try:
                             await channel.send(embed=embeds.schedule_changed_embed(m, row.get("match_date"), row.get("match_time")))
@@ -352,7 +478,7 @@ class PindolzBot(commands.Bot):
                             print(f"[schedule] send error: {e}")
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
                 continue
-            msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None)
+            msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid))
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, status="scheduled", notified_upcoming=1, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
 
     PREMATCH_MINUTES = 30
@@ -368,8 +494,6 @@ class PindolzBot(commands.Bot):
     @tasks.loop(minutes=1)
     async def prematch_check(self):
         channel = await self.get_channel_safe(self._main_channel_id())
-        if not channel:
-            return
         try:
             upcoming = self._upcoming_cached()
         except Exception as e:
@@ -404,12 +528,14 @@ class PindolzBot(commands.Bot):
                         opp_standing = row
             except Exception:
                 pass
-            try:
-                await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing))
-                print(f"[prematch] wysłano przypomnienie o meczu {mid}")
-            except Exception as e:
-                db.set_config(key, None)
-                print(f"[prematch] send error: {e}")
+            await self._send_reminder_dms(m)
+            if channel and feature_on("prematch"):
+                try:
+                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing))
+                    print(f"[prematch] wysłano przypomnienie o meczu {mid}")
+                except Exception as e:
+                    db.set_config(key, None)
+                    print(f"[prematch] send error: {e}")
 
     @prematch_check.before_loop
     async def before_prematch(self):
@@ -424,6 +550,8 @@ class PindolzBot(commands.Bot):
         await self.wait_until_ready()
 
     async def _run_live_check(self):
+        if not feature_on("live"):
+            return
         channel = await self.get_channel_safe(self._live_channel_id())
         if not channel:
             self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
@@ -460,10 +588,14 @@ class PindolzBot(commands.Bot):
                     view = None
                 msg = await channel.send(embed=emb, view=view)
                 db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="live", updated_at=m.get("updatedAt"), live_score_key=key, msg_live_id=msg.id, msg_live_ch=channel.id)
+                if feature_on("thread"):
+                    await self._create_live_thread(msg, m)
                 continue
             if key != row.get("live_score_key") or m.get("updatedAt") != row.get("updated_at"):
                 msg_id, ch_id = await self._edit_or_send(channel, embeds.live_embed(m), row.get("msg_live_id"), row.get("msg_live_ch"))
                 db.upsert_match(mid, status="live", updated_at=m.get("updatedAt"), live_score_key=key, msg_live_id=msg_id, msg_live_ch=ch_id)
+                if key != row.get("live_score_key") and feature_on("thread"):
+                    await self._post_thread_update(mid, self._live_line(m))
         known_live = db.get_live_matches()
         for row in known_live:
             mid = row["match_id"]
@@ -488,6 +620,7 @@ class PindolzBot(commands.Bot):
                     pass
                 score = match_data.get("score") or {}
                 await self._edit_or_send(channel, embeds.match_ended_embed(match_data, form=form, standing=standing), row.get("msg_live_id"), row.get("msg_live_ch"))
+                await self._post_thread_update(mid, f"🏁 **Koniec meczu:** {embeds._team_name(match_data, 'team1')} **{embeds._score_str(match_data)}** {embeds._team_name(match_data, 'team2')}", archive=True)
                 if not row.get("notified_result"):
                     main_ch = await self.get_channel_safe(self._main_channel_id())
                     if main_ch:
@@ -496,6 +629,7 @@ class PindolzBot(commands.Bot):
                         db.upsert_match(mid, notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
                 db.upsert_match(mid, status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=match_data.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat())
             else:
+                await self._post_thread_update(mid, "🏁 **Mecz zakończony.**", archive=True)
                 db.mark_finished(mid)
 
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
@@ -630,6 +764,14 @@ class PindolzBot(commands.Bot):
 
     @tasks.loop(seconds=30)
     async def status_loop(self):
+        if not feature_on("status"):
+            if self._status_current is not None:
+                try:
+                    await self.change_presence(status=discord.Status.online, activity=None)
+                except Exception:
+                    pass
+                self._status_current = None
+            return
         try:
             statuses, is_live = await self._build_statuses()
         except Exception as e:
@@ -649,6 +791,231 @@ class PindolzBot(commands.Bot):
 
     @status_loop.before_loop
     async def before_status(self):
+        await self.wait_until_ready()
+
+    # ---------- PRZYPOMNIENIE „PRZYPOMNIJ MI” (DM) ----------
+    async def toggle_reminder(self, interaction: discord.Interaction, mid: int):
+        key = f"remind_{mid}"
+        try:
+            users = json.loads(db.get_config(key) or "[]")
+        except Exception:
+            users = []
+        row = db.get_match(mid) or {}
+        dt = embeds._match_dt({"matchDate": row.get("match_date"), "matchTime": row.get("match_time")}) if row else None
+        now = datetime.now(TZ)
+        if dt and dt <= now:
+            await interaction.response.send_message("Ten mecz już się rozpoczął.", ephemeral=True)
+            return
+        uid = interaction.user.id
+        if uid in users:
+            users.remove(uid)
+            db.set_config(key, json.dumps(users))
+            await interaction.response.send_message("🔕 Przypomnienie anulowane.", ephemeral=True)
+            return
+        users.append(uid)
+        db.set_config(key, json.dumps(users))
+        extra = ""
+        if dt and dt - now <= timedelta(minutes=self.PREMATCH_MINUTES):
+            extra = "\n⚠️ Do meczu zostało mniej niż 30 minut, więc przypomnienie może już nie przyjść."
+        await interaction.response.send_message(
+            "🔔 Wyślę Ci wiadomość prywatną 30 minut przed meczem.\n"
+            "Upewnij się, że masz włączone wiadomości prywatne od członków serwera. Kliknij ponownie, aby anulować." + extra,
+            ephemeral=True,
+        )
+
+    async def _send_reminder_dms(self, match: dict):
+        mid = match.get("id")
+        if mid is None or db.get_config(f"remind_sent_{mid}"):
+            return
+        db.set_config(f"remind_sent_{mid}", "1")
+        try:
+            users = json.loads(db.get_config(f"remind_{mid}") or "[]")
+        except Exception:
+            users = []
+        for uid in users:
+            try:
+                user = self.get_user(uid) or await self.fetch_user(uid)
+                await user.send(
+                    content="🔔 **Przypomnienie:** mecz PINDOLZ zaczyna się za około 30 minut!",
+                    embed=embeds.prematch_embed(match),
+                )
+            except Exception as e:
+                print(f"[remind] DM do {uid}: {e}")
+
+    # ---------- ANKIETA DOSTĘPNOŚCI ----------
+    def _poll_roles(self) -> list[int]:
+        try:
+            return [int(x) for x in json.loads(db.get_config("poll_roles") or "[]")]
+        except Exception:
+            return []
+
+    def _poll_info(self, mid: int) -> dict:
+        try:
+            return json.loads(db.get_config(f"poll_info_{mid}") or "{}")
+        except Exception:
+            return {}
+
+    def _poll_votes(self, mid: int) -> dict:
+        try:
+            return json.loads(db.get_config(f"poll_votes_{mid}") or "{}")
+        except Exception:
+            return {}
+
+    async def handle_poll_vote(self, interaction: discord.Interaction, mid: int, vote: str):
+        info = self._poll_info(mid)
+        ts = info.get("ts")
+        if ts and datetime.now(TZ).timestamp() >= ts:
+            await interaction.response.send_message("Ankieta zakończona, mecz już się rozpoczął.", ephemeral=True)
+            return
+        votes = self._poll_votes(mid)
+        uid = str(interaction.user.id)
+        if votes.get(uid) == vote:
+            votes.pop(uid, None)
+        else:
+            votes[uid] = vote
+        db.set_config(f"poll_votes_{mid}", json.dumps(votes))
+        await interaction.response.edit_message(embed=embeds.poll_embed(info, votes))
+
+    @tasks.loop(minutes=5)
+    async def poll_check(self):
+        if not feature_on("polls"):
+            return
+        channel = await self.get_channel_safe(db.get_config_int("poll_channel_id"))
+        if not channel:
+            return
+        try:
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+        except Exception as e:
+            print(f"[poll] API error: {e}")
+            return
+        now = datetime.now(TZ)
+        nxt = None
+        for m in upcoming:
+            dt = embeds._match_dt(m)
+            # ankieta tylko gdy ustalona jest i data, i godzina
+            if m.get("id") is None or dt is None or not m.get("matchDate") or not m.get("matchTime") or dt <= now:
+                continue
+            if nxt is None or dt < nxt[0]:
+                nxt = (dt, m)
+        if not nxt:
+            return
+        dt, m = nxt
+        mid = m["id"]
+        info = {"opp": self._opponent(m), "ts": int(dt.timestamp()), "div": m.get("division"), "bo": m.get("bestOf")}
+        mentions = " ".join(f"<@&{r}>" for r in self._poll_roles())
+        allowed = discord.AllowedMentions(roles=True, users=False, everyone=False)
+        existing = db.get_config(f"poll_msg_{mid}")
+        if not existing:
+            try:
+                msg = await channel.send(
+                    content=mentions or None,
+                    embed=embeds.poll_embed(info, {}),
+                    view=poll_view(mid),
+                    allowed_mentions=allowed,
+                )
+            except Exception as e:
+                print(f"[poll] send error: {e}")
+                return
+            db.set_config(f"poll_msg_{mid}", f"{channel.id}:{msg.id}")
+            db.set_config(f"poll_info_{mid}", json.dumps(info))
+            db.set_config(f"poll_votes_{mid}", "{}")
+            print(f"[poll] wysłano ankietę dla meczu {mid}")
+            return
+        old = self._poll_info(mid)
+        if old.get("ts") == info["ts"] and old.get("opp") == info["opp"]:
+            return
+        try:
+            ch_id, msg_id = (int(x) for x in existing.split(":"))
+            ch = await self.get_channel_safe(ch_id) or channel
+            msg = await ch.fetch_message(msg_id)
+            await msg.edit(embed=embeds.poll_embed(info, self._poll_votes(mid)), view=poll_view(mid))
+            db.set_config(f"poll_info_{mid}", json.dumps(info))
+            if old.get("ts") != info["ts"]:
+                text = "📅 **Zmiana terminu meczu.** Zagłosuj ponownie, jeśli Twoja dostępność się zmieniła."
+                await ch.send(content=f"{mentions} {text}".strip(), allowed_mentions=allowed)
+        except Exception as e:
+            print(f"[poll] update error: {e}")
+
+    @poll_check.before_loop
+    async def before_poll(self):
+        await self.wait_until_ready()
+
+    # ---------- WĄTEK LIVE ----------
+    @staticmethod
+    def _live_line(m: dict) -> str:
+        t1 = (m.get("team1") or {}).get("name") or "???"
+        t2 = (m.get("team2") or {}).get("name") or "???"
+        cur = m.get("currentMap") or {}
+        cs = cur.get("score") or {}
+        series = m.get("seriesScore") or {}
+        line = f"🗺️ **{cur.get('name') or '?'}** · {t1} **{cs.get('team1', 0)}:{cs.get('team2', 0)}** {t2}"
+        if series.get("team1") is not None:
+            line += f" · seria **{series.get('team1', 0)}:{series.get('team2', 0)}**"
+        return line
+
+    async def _create_live_thread(self, msg, match: dict):
+        mid = match.get("id")
+        try:
+            thread = await msg.create_thread(name=f"LIVE PINDOLZ vs {self._opponent(match)}"[:100], auto_archive_duration=1440)
+            db.set_config(f"live_thread_{mid}", str(thread.id))
+            await thread.send(f"🔴 **Start meczu!**\n{self._live_line(match)}")
+        except Exception as e:
+            print(f"[thread] create error: {e}")
+
+    async def _post_thread_update(self, mid: int, text: str, archive: bool = False):
+        tid = db.get_config_int(f"live_thread_{mid}")
+        if not tid:
+            return
+        try:
+            thread = await self.get_channel_safe(tid)
+            if not thread:
+                return
+            await thread.send(text)
+            if archive:
+                await thread.edit(archived=True)
+        except Exception as e:
+            print(f"[thread] update error: {e}")
+
+    # ---------- ALERT O AWARII API ----------
+    async def _dm_owner(self, text: str):
+        try:
+            info = await self.application_info()
+            await info.owner.send(text)
+        except Exception as e:
+            print(f"[alert] nie udało się wysłać DM: {e}")
+
+    @staticmethod
+    def _api_error_text(err: Exception | None) -> str:
+        code = getattr(getattr(err, "response", None), "status_code", None)
+        if code in (401, 403):
+            return (
+                f"🔑 **Token API StarterLeague jest błędny lub wygasł** (HTTP {code}).\n"
+                "Wygeneruj nowy i wpisz go w pliku `.env` (`STARTERLEAGUE_API_TOKEN`), a potem zrestartuj serwer."
+            )
+        if code == 429:
+            return "⏳ **API StarterLeague zwraca limit zapytań** (HTTP 429). Bot spróbuje ponownie sam."
+        return f"🚨 **API StarterLeague nie odpowiada od ok. 3 minut.**\n`{str(err)[:300]}`"
+
+    @tasks.loop(seconds=60)
+    async def api_watch(self):
+        if not feature_on("alerts"):
+            return
+        try:
+            await asyncio.to_thread(self.api.get_pindolz_live)
+        except Exception as e:
+            self._api_fail += 1
+            print(f"[api_watch] błąd ({self._api_fail}): {e}")
+            if self._api_fail >= 3 and not self._api_alerted:
+                self._api_alerted = True
+                await self._dm_owner(self._api_error_text(e))
+            return
+        self._api_fail = 0
+        if self._api_alerted:
+            self._api_alerted = False
+            await self._dm_owner("✅ **API StarterLeague znów działa.**")
+
+    @api_watch.before_loop
+    async def before_api_watch(self):
         await self.wait_until_ready()
 
     @tasks.loop(time=time(4, 0, tzinfo=TZ))
@@ -837,10 +1204,128 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
         await interaction.followup.send(f"Kanał ustawiony, błąd tabeli: {e}", ephemeral=True)
 
 
+def _demo_embeds(user_id: int) -> list[tuple[str, discord.Embed]]:
+    now = datetime.now(TZ)
+    start = now + timedelta(days=2, hours=3)
+    past = now - timedelta(days=1)
+    t_us = {"id": PINDOLZ_TEAM_ID, "name": "PINDOLZ"}
+    t_op = {"id": 1, "name": "Przykładowa Drużyna"}
+    base = {
+        "id": 0, "division": "Starter Division 6", "bestOf": 3, "team1": t_us, "team2": t_op,
+        "matchDate": start.strftime("%Y-%m-%d"), "matchTime": start.strftime("%H:%M:%S"),
+    }
+    win = {**base, "matchDate": past.strftime("%Y-%m-%d"), "score": {"team1": 2, "team2": 0}, "winnerTeamId": PINDOLZ_TEAM_ID}
+    loss = {**win, "score": {"team1": 0, "team2": 2}, "winnerTeamId": 1}
+    live = {**base, "currentMap": {"name": "Mirage", "score": {"team1": 7, "team2": 5}}, "seriesScore": {"team1": 1, "team2": 0}}
+    names = ["Alfa", "Bravo", "Charlie", "Delta", "PINDOLZ", "Foxtrot", "Golf", "Hotel", "India", "Juliett", "Kilo", "Lima"]
+    table = [
+        {"rank": i + 1, "team": {"id": 100 + i, "name": n}, "wins": 9 - i // 2, "losses": 1 + i // 2,
+         "roundDifference": 30 - i * 5, "points": 27 - i * 2}
+        for i, n in enumerate(names)
+    ]
+    standing, opp_standing = table[4], table[2]
+    poll_info = {"opp": t_op["name"], "ts": int(start.timestamp()), "div": base["division"], "bo": 3}
+    votes = {str(user_id): "yes", "111": "no", "222": "maybe"}
+    items = [
+        ("Nadchodzące mecze", lambda: embeds.upcoming_embed([base])),
+        ("Karta meczu", lambda: embeds.single_upcoming_embed(base)),
+        ("Przypomnienie 30 min", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing)),
+        ("Ankieta dostępności", lambda: embeds.poll_embed(poll_info, votes)),
+        ("Zmiana terminu", lambda: embeds.schedule_changed_embed(base, past.strftime("%Y-%m-%d"), "18:00:00")),
+        ("LIVE", lambda: embeds.live_embed(live)),
+        ("Start meczu", lambda: embeds.match_started_embed(base)),
+        ("Wynik: wygrana", lambda: embeds.result_embed(win, form="WWLWW", standing=standing)),
+        ("Wynik: porażka", lambda: embeds.result_embed(loss, form="WWLWL", standing=standing)),
+        ("Ostatnie wyniki", lambda: embeds.history_embed([win, loss])),
+        ("Tabela", lambda: embeds.standings_embed(table, changes={"PINDOLZ": 2, "ALFA": -1})),
+        ("Awans w tabeli", lambda: embeds.rank_change_embed(6, 5, standing["points"])),
+        ("Spadek w tabeli", lambda: embeds.rank_change_embed(4, 5, standing["points"])),
+        ("Podsumowanie tygodnia", lambda: embeds.weekly_summary_embed([win, loss], 1, 1, standing)),
+        ("Bot online", lambda: embeds.restart_embed(BOT_VERSION, None, None, None)),
+        ("Pomoc", lambda: embeds.help_embed()),
+    ]
+    out = []
+    for name, fn in items:
+        try:
+            out.append((name, fn()))
+        except Exception as e:
+            out.append((name, discord.Embed(title=f"Błąd karty: {name}", description=str(e)[:500], color=0xEF4444)))
+    return out
+
+
+@bot.tree.command(name="setup-ankiety", description="Ustaw osobny kanał na ankiety dostępności (właściciel)")
+@app_commands.describe(kanal="Kanał, na którym bot będzie pytał „Kto może grać?”")
+async def cmd_setup_ankiety(interaction: discord.Interaction, kanal: discord.TextChannel):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    db.set_config("poll_channel_id", str(kanal.id))
+    roles = bot._poll_roles()
+    roles_txt = " ".join(f"<@&{r}>" for r in roles) if roles else "brak (ustaw przez `/ankieta-role`)"
+    await interaction.response.send_message(
+        f"Kanał ankiet ustawiony na {kanal.mention}.\nPingowane role: {roles_txt}\n"
+        "Ankieta pojawi się, gdy najbliższy mecz będzie miał ustaloną datę i godzinę.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="ankieta-role", description="Role pingowane przy ankiecie (bez argumentów czyści listę)")
+@app_commands.describe(rola1="Rola 1", rola2="Rola 2", rola3="Rola 3", rola4="Rola 4", rola5="Rola 5")
+async def cmd_ankieta_role(
+    interaction: discord.Interaction,
+    rola1: Optional[discord.Role] = None,
+    rola2: Optional[discord.Role] = None,
+    rola3: Optional[discord.Role] = None,
+    rola4: Optional[discord.Role] = None,
+    rola5: Optional[discord.Role] = None,
+):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    roles = [r for r in (rola1, rola2, rola3, rola4, rola5) if r is not None]
+    db.set_config("poll_roles", json.dumps([r.id for r in roles]))
+    if roles:
+        await interaction.response.send_message("Ankieta będzie pingować: " + " ".join(r.mention for r in roles), ephemeral=True)
+    else:
+        await interaction.response.send_message("Lista ról wyczyszczona, ankieta nie będzie nikogo pingować.", ephemeral=True)
+
+
+@bot.tree.command(name="ustawienia", description="Włączanie i wyłączanie funkcji bota (właściciel)")
+async def cmd_ustawienia(interaction: discord.Interaction):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=settings_embed(), view=SettingsView(), ephemeral=True)
+
+
+@bot.tree.command(name="pokaz-embedy", description="Podgląd wszystkich kart bota z przykładowymi danymi (właściciel)")
+async def cmd_pokaz_embedy(interaction: discord.Interaction):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    cards = _demo_embeds(interaction.user.id)
+    for i in range(0, len(cards), 3):
+        chunk = cards[i:i + 3]
+        content = " · ".join(f"**{n}**" for n, _ in chunk)
+        try:
+            await interaction.followup.send(content=content, embeds=[e for _, e in chunk], ephemeral=True)
+        except discord.HTTPException:
+            for n, e in chunk:
+                try:
+                    await interaction.followup.send(content=f"**{n}**", embed=e, ephemeral=True)
+                except discord.HTTPException as err:
+                    await interaction.followup.send(f"Nie udało się pokazać „{n}”: {err}", ephemeral=True)
+
+
 @bot.event
 async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
     print(f"Wersja: {BOT_VERSION}")
+    try:
+        embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
+    except Exception:
+        pass
     print("Bot gotowy – taski wystartują stopniowo (~1 min 30 s).")
     if bot._announced:
         return
