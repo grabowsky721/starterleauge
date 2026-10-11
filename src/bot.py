@@ -53,12 +53,19 @@ TABLE_UPDATE_TIMES = [
 ]
 LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
-START_DELAY_LIVE = 15
-START_DELAY_PREMATCH = 30
+# Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
+START_DELAY_LIVE = 20
+START_DELAY_PREMATCH = 35
 START_DELAY_TABLE = 45
 START_DELAY_DAILY = 60
-START_DELAY_WEEKLY = 75
-START_DELAY_CLEANUP = 90
+START_DELAY_CLEANUP = 80
+START_DELAY_STATUS = 100
+START_DELAY_POLL = 120
+START_DELAY_API = 140
+START_DELAY_EVENT = 160
+START_DELAY_COMMANDS = 180
+START_DELAY_UPDATE = 200
+START_DELAY_WEEKLY = 220
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
 STATUS_PHRASES = [
@@ -303,55 +310,81 @@ class PindolzBot(commands.Bot):
             self.add_dynamic_items(RemindButton, PollButton, GGButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
-        try:
-            synced = await self.tree.sync()
-            print(f"[sync] global: {len(synced)} komend")
-        except Exception as e:
-            print(f"[sync] blad: {e}")
+        # Slash-komendy syncowane na końcu soft-startu (przed update_check)
         asyncio.create_task(self._soft_start_tasks())
 
     async def _soft_start_tasks(self):
         await self.wait_until_ready()
-        print("[start] soft-start tasków (~1 min 30 s)...")
+        print("[start] soft-start według harmonogramu (~3 min 40 s)...")
+
         await asyncio.sleep(START_DELAY_LIVE)
         if not self.live_check.is_running():
             self.live_check.start()
             print("[start] live_check")
+
         await asyncio.sleep(START_DELAY_PREMATCH - START_DELAY_LIVE)
         if not self.prematch_check.is_running():
             self.prematch_check.start()
             print("[start] prematch_check")
+
         await asyncio.sleep(START_DELAY_TABLE - START_DELAY_PREMATCH)
         if not self.table_update.is_running():
             self.table_update.start()
             print("[start] table_update")
+
         await asyncio.sleep(START_DELAY_DAILY - START_DELAY_TABLE)
         if not self.daily_check.is_running():
             self.daily_check.start()
             print("[start] daily_check")
-        await asyncio.sleep(START_DELAY_WEEKLY - START_DELAY_DAILY)
-        if not self.weekly_summary.is_running():
-            self.weekly_summary.start()
-            print("[start] weekly_summary")
-        await asyncio.sleep(START_DELAY_CLEANUP - START_DELAY_WEEKLY)
+
+        await asyncio.sleep(START_DELAY_CLEANUP - START_DELAY_DAILY)
         if not self.cleanup_task.is_running():
             self.cleanup_task.start()
-            print("[start] cleanup_task – soft-start zakończony")
+            print("[start] cleanup_task")
+
+        await asyncio.sleep(START_DELAY_STATUS - START_DELAY_CLEANUP)
         if not self.status_loop.is_running():
             self.status_loop.start()
             print("[start] status_loop")
+
+        await asyncio.sleep(START_DELAY_POLL - START_DELAY_STATUS)
         if not self.poll_check.is_running():
             self.poll_check.start()
             print("[start] poll_check")
+
+        await asyncio.sleep(START_DELAY_API - START_DELAY_POLL)
         if not self.api_watch.is_running():
             self.api_watch.start()
             print("[start] api_watch")
+
+        await asyncio.sleep(START_DELAY_EVENT - START_DELAY_API)
         if not self.event_check.is_running():
             self.event_check.start()
             print("[start] event_check")
+
+        await asyncio.sleep(START_DELAY_COMMANDS - START_DELAY_EVENT)
+        try:
+            for guild in self.guilds:
+                try:
+                    synced = await self.tree.sync(guild=guild)
+                    print(f"[sync] {guild.name}: {len(synced)} komend")
+                except Exception as e:
+                    print(f"[sync] guild {guild.id}: {e}")
+            synced = await self.tree.sync()
+            print(f"[sync] global: {len(synced)} komend")
+        except Exception as e:
+            print(f"[sync] blad: {e}")
+
+        await asyncio.sleep(START_DELAY_UPDATE - START_DELAY_COMMANDS)
         if not self.update_check.is_running():
             self.update_check.start()
             print("[start] update_check")
+
+        await asyncio.sleep(START_DELAY_WEEKLY - START_DELAY_UPDATE)
+        if not self.weekly_summary.is_running():
+            self.weekly_summary.start()
+            print("[start] weekly_summary – soft-start zakończony")
+
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         return bool(interaction.guild and interaction.user.id == interaction.guild.owner_id)
@@ -1755,16 +1788,7 @@ async def on_ready():
         embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
     except Exception:
         pass
-    try:
-        for guild in bot.guilds:
-            try:
-                synced = await bot.tree.sync(guild=guild)
-                print(f"[sync] {guild.name}: {len(synced)} komend")
-            except Exception as e:
-                print(f"[sync] guild {guild.id}: {e}")
-    except Exception as e:
-        print(f"[sync] on_ready: {e}")
-    print("Bot gotowy – taski wystartują stopniowo (~1 min 30 s).")
+    print("Bot gotowy – taski i komendy według harmonogramu soft-startu.")
     if bot._announced:
         return
     bot._announced = True
