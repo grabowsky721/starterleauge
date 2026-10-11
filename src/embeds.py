@@ -192,6 +192,7 @@ def prematch_embed(
     standing: dict | None = None,
     opp_standing: dict | None = None,
     minutes: int = 30,
+    lineup: list[int] | None = None,
 ) -> discord.Embed:
     opponent = _opponent(match)
     if minutes >= 60:
@@ -220,6 +221,8 @@ def prematch_embed(
         )
     if form:
         embed.add_field(name="🔥 Forma PINDOLZ", value=_form_icons(form), inline=False)
+    if lineup:
+        embed.add_field(name="👥 Skład", value=" ".join(f"<@{u}>" for u in lineup[:10]), inline=False)
     _add_links(embed)
     return embed
 
@@ -464,6 +467,24 @@ def poll_embed(info: dict, votes: dict, closed: bool = False) -> discord.Embed:
     return embed
 
 
+def lineup_embed(match: dict, ids: list[int]) -> discord.Embed:
+    embed = _base(
+        "👥 Skład na mecz",
+        C_TEAM,
+        f"## PINDOLZ  ⚔️  {_opponent(match)}\n🕒 {_ts(match, 'F')} · {_ts(match, 'R')}",
+    )
+    if ids:
+        embed.add_field(
+            name=f"Gracze ({len(ids)})",
+            value="\n".join(f"{i}. <@{u}>" for i, u in enumerate(ids, 1)),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Skład", value="Brak (skład wyczyszczony)", inline=False)
+    _add_links(embed)
+    return embed
+
+
 def help_embed() -> discord.Embed:
     embed = _base("📖 Komendy PINDOLZ bota", C_INFO)
     embed.add_field(
@@ -490,7 +511,8 @@ def help_embed() -> discord.Embed:
             "`/setup-ankiety` · kanał ankiet dostępności\n"
             "`/ankieta-role` · role pingowane w ankiecie\n"
             "`/ustawienia` · włączanie i wyłączanie funkcji\n"
-            "`/pokaz-embedy` · podgląd wszystkich kart"
+            "`/pokaz-embedy` · podgląd wszystkich kart\n"
+            "`/sklad` · skład na najbliższy mecz"
         ),
         inline=False,
     )
@@ -503,6 +525,8 @@ def help_embed() -> discord.Embed:
             "🏳️ wynik walkowerem (osobny styl)\n"
             "💬 krótki komentarz pod wynikiem\n"
             "📆 wydarzenie serwera Discord dla najbliższego meczu\n"
+            "👏 przycisk „GG” pod wynikiem\n"
+            "🆕 powiadomienie o nowej wersji bota (DM)\n"
             "🏆 tabela: 08:00, 18:00, 20:00, 21:30, 23:00\n"
             "🗓️ podsumowanie tygodnia (niedziela 20:00)\n"
             "🗳️ ankieta „Kto może grać?” gdy termin jest ustalony\n"
