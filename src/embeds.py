@@ -163,10 +163,15 @@ def prematch_embed(
     form: str | None = None,
     standing: dict | None = None,
     opp_standing: dict | None = None,
+    minutes: int = 30,
 ) -> discord.Embed:
     opponent = _opponent(match)
+    if minutes >= 60:
+        title = "⏰ Mecz PINDOLZ za ok. 1 godzinę!"
+    else:
+        title = "⏰ Mecz PINDOLZ już za chwilę!"
     embed = _base(
-        "⏰ Mecz PINDOLZ już za chwilę!",
+        title,
         C_UPCOMING,
         f"## PINDOLZ  ⚔️  {opponent}\nStart {_ts(match, 'R')}",
     )
@@ -458,7 +463,7 @@ def help_embed() -> discord.Embed:
     embed.add_field(
         name="🤖 Automatycznie",
         value=(
-            "⏰ przypomnienie 30 min przed meczem\n"
+            "⏰ przypomnienie 1 h i 30 min przed meczem\n"
             "🔴 LIVE co 5–10 s + przycisk kanału\n"
             "📅 zmiana terminu meczu\n"
             "🏳️ wynik walkowerem (osobny styl)\n"
