@@ -193,6 +193,7 @@ def prematch_embed(
     opp_standing: dict | None = None,
     minutes: int = 30,
     lineup: list[int] | None = None,
+    nicks: dict[int, str] | None = None,
 ) -> discord.Embed:
     opponent = _opponent(match)
     if minutes >= 60:
@@ -222,7 +223,7 @@ def prematch_embed(
     if form:
         embed.add_field(name="🔥 Forma PINDOLZ", value=_form_icons(form), inline=False)
     if lineup:
-        embed.add_field(name="👥 Skład", value=" ".join(f"<@{u}>" for u in lineup[:10]), inline=False)
+        embed.add_field(name="👥 Skład", value="\n".join(_player_line(u, nicks) for u in lineup[:10]), inline=False)
     _add_links(embed)
     return embed
 
@@ -467,7 +468,26 @@ def poll_embed(info: dict, votes: dict, closed: bool = False) -> discord.Embed:
     return embed
 
 
-def lineup_embed(match: dict, ids: list[int]) -> discord.Embed:
+def _player_line(uid: int, nicks: dict[int, str] | None) -> str:
+    nick = (nicks or {}).get(uid)
+    return f"<@{uid}> · `{nick}`" if nick else f"<@{uid}>"
+
+
+def players_embed(nicks: dict[int, str]) -> discord.Embed:
+    embed = _base("🎮 Powiązani gracze", C_TEAM)
+    if not nicks:
+        embed.description = "Brak powiązań. Właściciel serwera może je dodać komendą `/polacz`."
+        return embed
+    items = list(nicks.items())
+    lines = [f"<@{uid}> · `{nick}`" for uid, nick in items[:40]]
+    if len(items) > 40:
+        lines.append(f"… i {len(items) - 40} więcej")
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"{FOOTER} • {len(items)} powiązań")
+    return embed
+
+
+def lineup_embed(match: dict, ids: list[int], nicks: dict[int, str] | None = None) -> discord.Embed:
     embed = _base(
         "👥 Skład na mecz",
         C_TEAM,
@@ -476,7 +496,7 @@ def lineup_embed(match: dict, ids: list[int]) -> discord.Embed:
     if ids:
         embed.add_field(
             name=f"Gracze ({len(ids)})",
-            value="\n".join(f"{i}. <@{u}>" for i, u in enumerate(ids, 1)),
+            value="\n".join(f"{i}. {_player_line(u, nicks)}" for i, u in enumerate(ids, 1)),
             inline=False,
         )
     else:
@@ -495,6 +515,7 @@ def help_embed() -> discord.Embed:
             "`/wyniki` · ostatnie wyniki\n"
             "`/live` · czy gra teraz\n"
             "`/tabela` · tabela dywizji\n"
+            "`/gracze` · powiązani gracze\n"
             "`/wersja` · wersja bota\n"
             "`/status` · API i kanały\n"
             "`/pomoc` · ta lista"
@@ -512,7 +533,9 @@ def help_embed() -> discord.Embed:
             "`/ankieta-role` · role pingowane w ankiecie\n"
             "`/ustawienia` · włączanie i wyłączanie funkcji\n"
             "`/pokaz-embedy` · podgląd wszystkich kart\n"
-            "`/sklad` · skład na najbliższy mecz"
+            "`/sklad` · skład na najbliższy mecz\n"
+            "`/polacz` · powiąż osobę z nickiem gracza\n"
+            "`/gif-dodaj` · GIF-y po wygranej (też `/gif-lista`, `/gif-usun`)"
         ),
         inline=False,
     )
@@ -526,6 +549,7 @@ def help_embed() -> discord.Embed:
             "💬 krótki komentarz pod wynikiem\n"
             "📆 wydarzenie serwera Discord dla najbliższego meczu\n"
             "👏 przycisk „GG” pod wynikiem\n"
+            "🎞️ losowy GIF po wygranej\n"
             "🆕 powiadomienie o nowej wersji bota (DM)\n"
             "🏆 tabela: 08:00, 18:00, 20:00, 21:30, 23:00\n"
             "🗓️ podsumowanie tygodnia (niedziela 20:00)\n"
