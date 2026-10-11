@@ -120,6 +120,8 @@ class LiveChannelView(discord.ui.View):
 # ---------- Włączanie / wyłączanie funkcji (/ustawienia) ----------
 FEATURES = {
     "prematch": ("Przypomnienia", "⏰ Przypomnienie 30 min przed meczem na kanale głównym"),
+    "prematch1h": ("Przypomnienie 1 h", "⏰ Przypomnienie 1 godzinę przed meczem na kanale głównym"),
+    "events": ("Wydarzenia", "📆 Wydarzenie serwera Discord dla najbliższego meczu"),
     "reactions": ("Reakcje", "🎉 Reakcje 🎉/😢 pod wynikiem"),
     "status": ("Status", "🟢 Status bota (odliczanie, seria, LIVE)"),
     "live": ("LIVE", "🔴 Relacja LIVE na kanale LIVE"),
@@ -222,6 +224,7 @@ class PindolzBot(commands.Bot):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.api = StarterLeagueClient()
+        self.api.on_division = embeds.set_division
         self._upcoming_cache: tuple[datetime, list] | None = None
         self.started_at = datetime.now(TZ)
         self._announced = False
@@ -278,6 +281,9 @@ class PindolzBot(commands.Bot):
         if not self.api_watch.is_running():
             self.api_watch.start()
             print("[start] api_watch")
+        if not self.event_check.is_running():
+            self.event_check.start()
+            print("[start] event_check")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         return bool(interaction.guild and interaction.user.id == interaction.guild.owner_id)
@@ -523,9 +529,13 @@ class PindolzBot(commands.Bot):
             if mid is None or dt is None:
                 continue
             delta = dt - now
-            if not (timedelta(0) < delta <= timedelta(minutes=self.PREMATCH_MINUTES)):
+            if timedelta(0) < delta <= timedelta(minutes=self.PREMATCH_MINUTES):
+                stage = self.PREMATCH_MINUTES
+            elif timedelta(minutes=self.PREMATCH_MINUTES) < delta <= timedelta(minutes=60):
+                stage = 60
+            else:
                 continue
-            key = f"prematch_{mid}"
+            key = f"prematch_{mid}" if stage == self.PREMATCH_MINUTES else f"prematch60_{mid}"
             if db.get_config(key):
                 continue
             db.set_config(key, "1")
@@ -545,11 +555,12 @@ class PindolzBot(commands.Bot):
                         opp_standing = row
             except Exception:
                 pass
-            await self._send_reminder_dms(m)
-            if channel and feature_on("prematch"):
+            if stage == self.PREMATCH_MINUTES:
+                await self._send_reminder_dms(m)
+            if channel and feature_on("prematch" if stage == self.PREMATCH_MINUTES else "prematch1h"):
                 try:
-                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing))
-                    print(f"[prematch] wysłano przypomnienie o meczu {mid}")
+                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing, minutes=stage))
+                    print(f"[prematch] wysłano przypomnienie ({stage} min) o meczu {mid}")
                 except Exception as e:
                     db.set_config(key, None)
                     print(f"[prematch] send error: {e}")
@@ -638,6 +649,7 @@ class PindolzBot(commands.Bot):
                 score = match_data.get("score") or {}
                 await self._edit_or_send(channel, embeds.match_ended_embed(match_data, form=form, standing=standing), row.get("msg_live_id"), row.get("msg_live_ch"))
                 await self._post_thread_update(mid, f"🏁 **Koniec meczu:** {embeds._team_name(match_data, 'team1')} **{embeds._score_str(match_data)}** {embeds._team_name(match_data, 'team2')}", archive=True)
+                await self._finish_event(mid)
                 if not row.get("notified_result"):
                     main_ch = await self.get_channel_safe(self._main_channel_id())
                     if main_ch:
@@ -647,6 +659,7 @@ class PindolzBot(commands.Bot):
                 db.upsert_match(mid, status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=match_data.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat())
             else:
                 await self._post_thread_update(mid, "🏁 **Mecz zakończony.**", archive=True)
+                await self._finish_event(mid)
                 db.mark_finished(mid)
 
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
@@ -1018,6 +1031,82 @@ class PindolzBot(commands.Bot):
         except Exception as e:
             print(f"[thread] update error: {e}")
 
+    # ---------- WYDARZENIE SERWERA DISCORD ----------
+    @tasks.loop(minutes=5)
+    async def event_check(self):
+        if not feature_on("events"):
+            return
+        channel = await self.get_channel_safe(self._main_channel_id())
+        guild = getattr(channel, "guild", None)
+        if not guild:
+            return
+        try:
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+        except Exception as e:
+            print(f"[event] API error: {e}")
+            return
+        now = datetime.now(TZ)
+        nxt = None
+        for m in upcoming:
+            dt = embeds._match_dt(m)
+            if m.get("id") is None or dt is None or not m.get("matchDate") or not m.get("matchTime") or dt <= now:
+                continue
+            if nxt is None or dt < nxt[0]:
+                nxt = (dt, m)
+        if not nxt:
+            return
+        dt, m = nxt
+        mid = m["id"]
+        name = f"PINDOLZ vs {self._opponent(m)}"[:100]
+        end = dt + timedelta(hours=2)
+        desc = f"{m.get('division') or ''} · Bo{m.get('bestOf') or '?'}\nWyniki na żywo na kanale LIVE.".strip()
+        eid = db.get_config_int(f"event_{mid}")
+        if eid:
+            try:
+                ev = guild.get_scheduled_event(eid) or await guild.fetch_scheduled_event(eid)
+            except discord.NotFound:
+                return  # usunięte ręcznie – nie tworzymy ponownie
+            except Exception as e:
+                print(f"[event] fetch error: {e}")
+                return
+            if ev.status != discord.EventStatus.scheduled:
+                return
+            if abs(ev.start_time.timestamp() - dt.timestamp()) > 30 or ev.name != name:
+                try:
+                    await ev.edit(name=name, start_time=dt, end_time=end, description=desc)
+                    print(f"[event] zaktualizowano wydarzenie meczu {mid}")
+                except Exception as e:
+                    print(f"[event] edit error: {e}")
+            return
+        try:
+            ev = await guild.create_scheduled_event(
+                name=name, start_time=dt, end_time=end, location="StarterLeague · online", description=desc[:1000],
+            )
+        except Exception as e:
+            print(f"[event] create error: {e}")
+            return
+        db.set_config(f"event_{mid}", str(ev.id))
+        print(f"[event] utworzono wydarzenie meczu {mid}")
+
+    @event_check.before_loop
+    async def before_event_check(self):
+        await self.wait_until_ready()
+
+    async def _finish_event(self, mid: int):
+        eid = db.get_config_int(f"event_{mid}")
+        if not eid:
+            return
+        try:
+            channel = await self.get_channel_safe(self._main_channel_id())
+            guild = getattr(channel, "guild", None)
+            if not guild:
+                return
+            ev = guild.get_scheduled_event(eid) or await guild.fetch_scheduled_event(eid)
+            if ev.status == discord.EventStatus.active:
+                await ev.edit(status=discord.EventStatus.completed)
+        except Exception as e:
+            print(f"[event] finish error: {e}")
+
     # ---------- ALERT O AWARII API ----------
     async def _dm_owner(self, text: str):
         try:
@@ -1125,7 +1214,7 @@ async def cmd_nadchodzace(interaction: discord.Interaction):
     await interaction.followup.send(embed=embeds.upcoming_embed(upcoming))
 
 
-@bot.tree.command(name="tabela", description="Tabela Starter Division 6")
+@bot.tree.command(name="tabela", description="Tabela dywizji PINDOLZ")
 async def cmd_tabela(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
@@ -1182,7 +1271,7 @@ async def cmd_status(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="setup-all", description="Ustaw wszystkie kanały naraz (właściciel)")
-@app_commands.describe(glowny="Kanał na wyniki i nadchodzące", live="Kanał LIVE", tabela="Kanał tabeli Division 6")
+@app_commands.describe(glowny="Kanał na wyniki i nadchodzące", live="Kanał LIVE", tabela="Kanał tabeli dywizji")
 async def cmd_setup_all(interaction: discord.Interaction, glowny: discord.TextChannel, live: discord.TextChannel, tabela: discord.TextChannel):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
@@ -1224,7 +1313,7 @@ async def cmd_setup_live(interaction: discord.Interaction, kanal: discord.TextCh
     await interaction.response.send_message(f"Kanał live ustawiony na {kanal.mention}", ephemeral=True)
 
 
-@bot.tree.command(name="setup-tabela", description="Ustaw kanał tabeli Division 6")
+@bot.tree.command(name="setup-tabela", description="Ustaw kanał tabeli dywizji")
 @app_commands.describe(kanal="Kanał na automatyczną tabelę")
 async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.TextChannel):
     if not bot.is_owner(interaction):
@@ -1271,6 +1360,7 @@ def _demo_embeds(user_id: int) -> list[tuple[str, discord.Embed]]:
     items = [
         ("Nadchodzące mecze", lambda: embeds.upcoming_embed([base])),
         ("Karta meczu", lambda: embeds.single_upcoming_embed(base)),
+        ("Przypomnienie 1 h", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing, minutes=60)),
         ("Przypomnienie 30 min", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing)),
         ("Ankieta dostępności", lambda: embeds.poll_embed(poll_info, votes)),
         ("Zmiana terminu", lambda: embeds.schedule_changed_embed(base, past.strftime("%Y-%m-%d"), "18:00:00")),
