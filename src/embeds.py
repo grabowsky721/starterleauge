@@ -1,4 +1,5 @@
 import discord
+import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -6,6 +7,33 @@ TZ = ZoneInfo("Europe/Warsaw")
 PINDOLZ_ID = 869
 TEAM_URL = "https://starterleague.pl/team/869"
 FOOTER = "PINDOLZ • StarterLeague"
+DIVISION = "Starter Division 6"  # aktualizowane automatycznie przez bota (wykrywanie dywizji)
+
+
+def set_division(name: str | None) -> None:
+    global DIVISION
+    if name:
+        DIVISION = name
+
+
+# Komentarze pod wynikiem (59) – edytuj dowolnie. Dla danego meczu zawsze wybierany jest ten sam.
+RESULT_COMMENTS_WIN = [
+    "Czysta robota! 🔥",
+    "GG WP, PINDOLZ! 🚩",
+    "Tak się to robi! 💪",
+    "Kolejne punkty na koncie 🏆",
+    "Maszyna jedzie dalej 🚀",
+    "Rywal nie miał szans 😎",
+    "Zasłużona wygrana! 👏",
+]
+RESULT_COMMENTS_LOSS = [
+    "Wracamy mocniejsi 💪",
+    "Następnym razem będzie nasze 🚩",
+    "To tylko jedna przegrana bitwa ⚔️",
+    "Wyciągamy wnioski i jedziemy dalej 🧠",
+    "Głowa do góry, PINDOLZ! 🚩",
+    "Rewanż będzie słodki 😤",
+]
 AUTHOR_NAME = "PINDOLZ"
 AUTHOR_ICON: str | None = None  # ustawiane przez bota po starcie (avatar bota)
 
@@ -240,6 +268,11 @@ def result_embed(
     desc = f"## {t1}  {_score_str(match)}  {t2}"
     if wo:
         desc += "\n*Mecz rozstrzygnięty walkowerem*"
+    elif res is not None:
+        pool = RESULT_COMMENTS_WIN if res else RESULT_COMMENTS_LOSS
+        if pool:
+            seed = str(match.get("id") or match.get("matchDate") or "")
+            desc += f"\n*{random.Random(seed).choice(pool)}*"
     embed = _base(title, color, desc)
     embed.add_field(name="📅 Data", value=match.get("matchDate") or "-", inline=True)
     embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
@@ -317,9 +350,10 @@ def schedule_changed_embed(match: dict, old_date: str | None, old_time: str | No
 
 def standings_embed(
     table: list[dict],
-    division: str = "Starter Division 6",
+    division: str | None = None,
     changes: dict | None = None,
 ) -> discord.Embed:
+    division = division or DIVISION
     embed = _base(f"🏆 Tabela · {division}", C_TABLE)
     if not table:
         embed.description = "Brak danych tabeli."
@@ -439,7 +473,7 @@ def help_embed() -> discord.Embed:
             "`/nadchodzace` · nadchodzące\n"
             "`/wyniki` · ostatnie wyniki\n"
             "`/live` · czy gra teraz\n"
-            "`/tabela` · Division 6\n"
+            "`/tabela` · tabela dywizji\n"
             "`/wersja` · wersja bota\n"
             "`/status` · API i kanały\n"
             "`/pomoc` · ta lista"
@@ -467,6 +501,8 @@ def help_embed() -> discord.Embed:
             "🔴 LIVE co 5–10 s + przycisk kanału\n"
             "📅 zmiana terminu meczu\n"
             "🏳️ wynik walkowerem (osobny styl)\n"
+            "💬 krótki komentarz pod wynikiem\n"
+            "📆 wydarzenie serwera Discord dla najbliższego meczu\n"
             "🏆 tabela: 08:00, 18:00, 20:00, 21:30, 23:00\n"
             "🗓️ podsumowanie tygodnia (niedziela 20:00)\n"
             "🗳️ ankieta „Kto może grać?” gdy termin jest ustalony\n"
