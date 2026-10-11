@@ -1,14 +1,20 @@
-import base64
-import os
-import sys
-from pathlib import Path
+"""
+TYMCZASOWO: bot.py został uszkodzony przy pushu duzego pliku.
 
-_parts = []
-for i in range(9):
-    mod = __import__(f"src._c{i}", fromlist=["CHUNK"])
-    _parts.append(mod.CHUNK)
+PRZYWROCENIE (wybierz jedna metode):
 
-_src = base64.b64decode("".join(_parts)).decode("utf-8")
-_ns = globals()
-_ns["__file__"] = os.path.abspath(__file__)
-exec(compile(_src, _ns["__file__"], "exec"), _ns)
+1) Na komputerze / GameHost:
+   curl -L -o src/bot.py \
+     https://raw.githubusercontent.com/grabowsky721/starterleauge/4e90980ac18b2646c33df8e5823840d5dcb21434/src/bot.py
+
+2) Na GitHub:
+   otworz commit 4e90980ac18b2646c33df8e5823840d5dcb21434
+   -> src/bot.py -> trzy kropki -> View file -> Copy
+   wklej do src/bot.py na main i commitnij
+
+Po przywroceniu daj znac – dolozymy przypomnienie 1h przed meczem.
+"""
+raise SystemExit(
+    "Przywroc src/bot.py z commita 4e90980ac18b2646c33df8e5823840d5dcb21434 "
+    "(patrz komentarz na gorze tego pliku)."
+)
