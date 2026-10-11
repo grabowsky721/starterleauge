@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,6 +56,22 @@ START_DELAY_TABLE = 45
 START_DELAY_DAILY = 60
 START_DELAY_WEEKLY = 75
 START_DELAY_CLEANUP = 90
+
+# Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
+STATUS_PHRASES = [
+    "🚩 Zawsze do przodu",
+    "💪 PINDOLZ nie odpuszcza",
+    "🔥 GG WP",
+    "🎯 Celujemy w top 1",
+    "⚡ Gramy o zwycięstwo",
+    "🚩 Do boju, PINDOLZ!",
+    "😎 Spokojnie, mamy to",
+    "🏆 Po puchar!",
+    "🧠 Taktyka ponad wszystko",
+    "🚀 Lecimy po wygraną",
+    "🤝 Razem silniejsi",
+    "👀 Śledzę PINDOLZ · /pomoc",
+]
 
 
 class RefreshTabelaView(discord.ui.View):
@@ -757,6 +774,31 @@ class PindolzBot(commands.Bot):
             else:
                 word = self._pl_plural(streak, "porażka", "porażki", "porażek")
                 statuses.append(f"📉 {streak} {word} z rzędu")
+
+        # Winrate i strata do lidera (z tabeli)
+        try:
+            table = await asyncio.to_thread(self.api.get_division6_table)
+        except Exception:
+            table = []
+        us = next((r for r in table if ((r.get("team") or {}).get("name") or "").upper() == "PINDOLZ"), None)
+        if us:
+            w, l = us.get("wins") or 0, us.get("losses") or 0
+            if w + l > 0:
+                statuses.append(f"📈 Winrate: {round(w / (w + l) * 100)}%")
+            leader_pts = max((r.get("points") or 0 for r in table), default=None)
+            our_pts = us.get("points")
+            if leader_pts is not None and our_pts is not None:
+                gap = leader_pts - our_pts
+                if us.get("rank") == 1:
+                    statuses.append("👑 PINDOLZ prowadzi w tabeli")
+                elif gap > 0:
+                    statuses.append(f"📊 Do lidera brakuje {gap} pkt")
+                else:
+                    statuses.append("📊 Remis punktowy z liderem")
+
+        # Losowe hasło
+        if STATUS_PHRASES:
+            statuses.append(random.choice(STATUS_PHRASES))
 
         if not statuses:
             statuses.append("👀 PINDOLZ · /pomoc")
