@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import requests
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,6 +39,8 @@ def load_version() -> str:
 
 
 BOT_VERSION = load_version()
+GITHUB_REPO = "grabowsky721/starterleauge"
+GITHUB_BRANCH = "main"
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 TZ = ZoneInfo("Europe/Warsaw")
 
@@ -122,6 +125,8 @@ FEATURES = {
     "prematch": ("Przypomnienia", "⏰ Przypomnienie 30 min przed meczem na kanale głównym"),
     "prematch1h": ("Przypomnienie 1 h", "⏰ Przypomnienie 1 godzinę przed meczem na kanale głównym"),
     "events": ("Wydarzenia", "📆 Wydarzenie serwera Discord dla najbliższego meczu"),
+    "gg": ("GG", "👏 Przycisk „GG” pod wynikiem"),
+    "updates": ("Aktualizacje", "🆕 Powiadomienie o nowej wersji bota na GitHubie"),
     "reactions": ("Reakcje", "🎉 Reakcje 🎉/😢 pod wynikiem"),
     "status": ("Status", "🟢 Status bota (odliczanie, seria, LIVE)"),
     "live": ("LIVE", "🔴 Relacja LIVE na kanale LIVE"),
@@ -189,6 +194,46 @@ def remind_view(mid: int) -> discord.ui.View:
     return view
 
 
+# ---------- Przycisk „GG” pod wynikiem ----------
+def _gg_users(mid: int) -> list[int]:
+    try:
+        return [int(x) for x in json.loads(db.get_config(f"gg_{mid}") or "[]")]
+    except Exception:
+        return []
+
+
+class GGButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_gg:(?P<mid>\d+)"):
+    def __init__(self, mid: int, count: int = 0):
+        label = "GG" + (f" · {count}" if count else "")
+        super().__init__(
+            discord.ui.Button(label=label, emoji="👏", style=discord.ButtonStyle.secondary, custom_id=f"pindolz_gg:{mid}")
+        )
+        self.mid = mid
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        mid = int(match["mid"])
+        return cls(mid, len(_gg_users(mid)))
+
+    async def callback(self, interaction: discord.Interaction):
+        users = _gg_users(self.mid)
+        uid = interaction.user.id
+        if uid in users:
+            users.remove(uid)
+        else:
+            users.append(uid)
+        db.set_config(f"gg_{self.mid}", json.dumps(users))
+        await interaction.response.edit_message(view=gg_view(self.mid, force=True))
+
+
+def gg_view(mid: int, force: bool = False) -> discord.ui.View | None:
+    if not force and not feature_on("gg"):
+        return None
+    view = discord.ui.View(timeout=None)
+    view.add_item(GGButton(mid, len(_gg_users(mid))))
+    return view
+
+
 # ---------- Przyciski ankiety dostępności ----------
 POLL_BUTTONS = {
     "yes": ("Mogę", "✅", discord.ButtonStyle.success),
@@ -239,7 +284,7 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         try:
-            self.add_dynamic_items(RemindButton, PollButton)
+            self.add_dynamic_items(RemindButton, PollButton, GGButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
         await self.tree.sync()
@@ -284,6 +329,9 @@ class PindolzBot(commands.Bot):
         if not self.event_check.is_running():
             self.event_check.start()
             print("[start] event_check")
+        if not self.update_check.is_running():
+            self.update_check.start()
+            print("[start] update_check")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         return bool(interaction.guild and interaction.user.id == interaction.guild.owner_id)
@@ -462,10 +510,10 @@ class PindolzBot(commands.Bot):
                 old_s1, old_s2 = row.get("score_team1"), row.get("score_team2")
                 new_s1, new_s2 = score.get("team1"), score.get("team2")
                 if (old_s1, old_s2) != (new_s1, new_s2) and new_s1 is not None:
-                    msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), row.get("msg_result_id"), row.get("msg_result_ch"))
+                    msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), row.get("msg_result_id"), row.get("msg_result_ch"), view=gg_view(mid))
                     db.upsert_match(mid, score_team1=new_s1, score_team2=new_s2, winner_team_id=m.get("winnerTeamId"), msg_result_id=msg_id, msg_result_ch=ch_id, status="finished")
                 continue
-            msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None)
+            msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None, view=gg_view(mid))
             await self._react_result(ch_id, msg_id, m)
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             if row and row.get("msg_live_id"):
@@ -559,7 +607,7 @@ class PindolzBot(commands.Bot):
                 await self._send_reminder_dms(m)
             if channel and feature_on("prematch" if stage == self.PREMATCH_MINUTES else "prematch1h"):
                 try:
-                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing, minutes=stage))
+                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing, minutes=stage, lineup=self._lineup_ids(mid)))
                     print(f"[prematch] wysłano przypomnienie ({stage} min) o meczu {mid}")
                 except Exception as e:
                     db.set_config(key, None)
@@ -653,7 +701,7 @@ class PindolzBot(commands.Bot):
                 if not row.get("notified_result"):
                     main_ch = await self.get_channel_safe(self._main_channel_id())
                     if main_ch:
-                        msg_id, ch_id = await self._edit_or_send(main_ch, embeds.result_embed(match_data, form=form, standing=standing), None, None)
+                        msg_id, ch_id = await self._edit_or_send(main_ch, embeds.result_embed(match_data, form=form, standing=standing), None, None, view=gg_view(mid))
                         await self._react_result(ch_id, msg_id, match_data)
                         db.upsert_match(mid, notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
                 db.upsert_match(mid, status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=match_data.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat())
@@ -892,7 +940,7 @@ class PindolzBot(commands.Bot):
                 user = self.get_user(uid) or await self.fetch_user(uid)
                 await user.send(
                     content="🔔 **Przypomnienie:** mecz PINDOLZ zaczyna się za około 30 minut!",
-                    embed=embeds.prematch_embed(match),
+                    embed=embeds.prematch_embed(match, lineup=self._lineup_ids(match.get("id"))),
                 )
             except Exception as e:
                 print(f"[remind] DM do {uid}: {e}")
@@ -1060,6 +1108,10 @@ class PindolzBot(commands.Bot):
         name = f"PINDOLZ vs {self._opponent(m)}"[:100]
         end = dt + timedelta(hours=2)
         desc = f"{m.get('division') or ''} · Bo{m.get('bestOf') or '?'}\nWyniki na żywo na kanale LIVE.".strip()
+        names = self._lineup_names(guild, self._lineup_ids(mid))
+        if names:
+            desc += "\nSkład: " + ", ".join(names)
+        desc = desc[:1000]
         eid = db.get_config_int(f"event_{mid}")
         if eid:
             try:
@@ -1071,7 +1123,7 @@ class PindolzBot(commands.Bot):
                 return
             if ev.status != discord.EventStatus.scheduled:
                 return
-            if abs(ev.start_time.timestamp() - dt.timestamp()) > 30 or ev.name != name:
+            if abs(ev.start_time.timestamp() - dt.timestamp()) > 30 or ev.name != name or (ev.description or "") != desc:
                 try:
                     await ev.edit(name=name, start_time=dt, end_time=end, description=desc)
                     print(f"[event] zaktualizowano wydarzenie meczu {mid}")
@@ -1080,7 +1132,7 @@ class PindolzBot(commands.Bot):
             return
         try:
             ev = await guild.create_scheduled_event(
-                name=name, start_time=dt, end_time=end, location="StarterLeague · online", description=desc[:1000],
+                name=name, start_time=dt, end_time=end, location="StarterLeague · online", description=desc,
             )
         except Exception as e:
             print(f"[event] create error: {e}")
@@ -1106,6 +1158,76 @@ class PindolzBot(commands.Bot):
                 await ev.edit(status=discord.EventStatus.completed)
         except Exception as e:
             print(f"[event] finish error: {e}")
+
+    # ---------- SKŁAD NA MECZ ----------
+    def _lineup_ids(self, mid) -> list[int]:
+        if mid is None:
+            return []
+        try:
+            return [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _lineup_names(guild, ids: list[int]) -> list[str]:
+        names = []
+        for uid in ids:
+            member = guild.get_member(uid) if guild else None
+            if member:
+                names.append(member.display_name)
+        return names
+
+    @staticmethod
+    def _next_match(upcoming: list[dict]):
+        now = datetime.now(TZ)
+        nxt = None
+        for m in upcoming:
+            dt = embeds._match_dt(m)
+            if m.get("id") is None or dt is None or dt <= now:
+                continue
+            if nxt is None or dt < nxt[0]:
+                nxt = (dt, m)
+        return nxt
+
+    # ---------- NOWA WERSJA NA GITHUBIE ----------
+    @staticmethod
+    def _ver_tuple(v: str) -> tuple:
+        try:
+            return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+        except Exception:
+            return ()
+
+    @staticmethod
+    def _fetch_remote_version() -> str | None:
+        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/VERSION"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        return r.text.strip()
+
+    @tasks.loop(hours=6)
+    async def update_check(self):
+        if not feature_on("updates"):
+            return
+        try:
+            remote = await asyncio.to_thread(self._fetch_remote_version)
+        except Exception as e:
+            print(f"[update] błąd sprawdzania wersji: {e}")
+            return
+        rt = self._ver_tuple(remote or "")
+        if not rt or rt <= self._ver_tuple(BOT_VERSION):
+            return
+        if db.get_config("update_notified") == remote:
+            return
+        db.set_config("update_notified", remote)
+        await self._dm_owner(
+            f"🆕 **Nowa wersja bota na GitHubie: {remote}** (uruchomiona: {BOT_VERSION}).\n"
+            "Zrestartuj serwer na hostingu, aby pobrać zmiany (jeśli masz włączone Auto Update) "
+            "albo wgraj nowe pliki ręcznie."
+        )
+
+    @update_check.before_loop
+    async def before_update_check(self):
+        await self.wait_until_ready()
 
     # ---------- ALERT O AWARII API ----------
     async def _dm_owner(self, text: str):
@@ -1360,8 +1482,9 @@ def _demo_embeds(user_id: int) -> list[tuple[str, discord.Embed]]:
     items = [
         ("Nadchodzące mecze", lambda: embeds.upcoming_embed([base])),
         ("Karta meczu", lambda: embeds.single_upcoming_embed(base)),
+        ("Skład na mecz", lambda: embeds.lineup_embed(base, [user_id, 111, 222])),
         ("Przypomnienie 1 h", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing, minutes=60)),
-        ("Przypomnienie 30 min", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing)),
+        ("Przypomnienie 30 min", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing, lineup=[user_id])),
         ("Ankieta dostępności", lambda: embeds.poll_embed(poll_info, votes)),
         ("Zmiana terminu", lambda: embeds.schedule_changed_embed(base, past.strftime("%Y-%m-%d"), "18:00:00")),
         ("LIVE", lambda: embeds.live_embed(live)),
@@ -1448,6 +1571,45 @@ async def cmd_pokaz_embedy(interaction: discord.Interaction):
                     await interaction.followup.send(content=f"**{n}**", embed=e, ephemeral=True)
                 except discord.HTTPException as err:
                     await interaction.followup.send(f"Nie udało się pokazać „{n}”: {err}", ephemeral=True)
+
+
+@bot.tree.command(name="sklad", description="Ustaw skład na najbliższy mecz (bez argumentów czyści; właściciel)")
+@app_commands.describe(
+    gracz1="Gracz 1", gracz2="Gracz 2", gracz3="Gracz 3", gracz4="Gracz 4",
+    gracz5="Gracz 5", gracz6="Gracz 6", gracz7="Gracz 7",
+)
+async def cmd_sklad(
+    interaction: discord.Interaction,
+    gracz1: Optional[discord.Member] = None,
+    gracz2: Optional[discord.Member] = None,
+    gracz3: Optional[discord.Member] = None,
+    gracz4: Optional[discord.Member] = None,
+    gracz5: Optional[discord.Member] = None,
+    gracz6: Optional[discord.Member] = None,
+    gracz7: Optional[discord.Member] = None,
+):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception as e:
+        await interaction.followup.send(f"Błąd API: {e}")
+        return
+    nxt = bot._next_match(upcoming)
+    if not nxt:
+        await interaction.followup.send("Brak nadchodzącego meczu z ustaloną datą, nie ma dla czego ustawić składu.")
+        return
+    _, m = nxt
+    players = [p for p in (gracz1, gracz2, gracz3, gracz4, gracz5, gracz6, gracz7) if p is not None]
+    ids = list(dict.fromkeys(p.id for p in players))
+    db.set_config(f"lineup_{m['id']}", json.dumps(ids))
+    await interaction.followup.send(embed=embeds.lineup_embed(m, ids))
+    try:
+        await bot.event_check.coro(bot)  # od razu odśwież opis wydarzenia serwera
+    except Exception as e:
+        print(f"[sklad] event: {e}")
 
 
 @bot.event
