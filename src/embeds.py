@@ -6,6 +6,8 @@ TZ = ZoneInfo("Europe/Warsaw")
 PINDOLZ_ID = 869
 TEAM_URL = "https://starterleague.pl/team/869"
 FOOTER = "PINDOLZ • StarterLeague"
+AUTHOR_NAME = "PINDOLZ"
+AUTHOR_ICON: str | None = None  # ustawiane przez bota po starcie (avatar bota)
 
 C_WIN = 0x22C55E
 C_LOSS = 0xEF4444
@@ -23,6 +25,7 @@ def _base(title: str, color: int, description: str | None = None) -> discord.Emb
         color=color,
         timestamp=datetime.now(TZ),
     )
+    embed.set_author(name=AUTHOR_NAME, url=TEAM_URL, icon_url=AUTHOR_ICON)
     embed.set_footer(text=FOOTER)
     return embed
 
@@ -380,6 +383,48 @@ def restart_embed(version: str, main_id: int | None, live_id: int | None, table_
     return embed
 
 
+def rank_change_embed(old_rank: int, new_rank: int, points=None) -> discord.Embed:
+    up = new_rank < old_rank
+    if up:
+        title, color, arrow, verb = "📈 PINDOLZ awansował w tabeli!", C_WIN, "▲", "awansował"
+    else:
+        title, color, arrow, verb = "📉 PINDOLZ spadł w tabeli", C_LOSS, "▼", "spadł"
+    embed = _base(title, color, f"## PINDOLZ {verb} na **{new_rank}. miejsce** {arrow}")
+    embed.add_field(name="Było", value=f"{old_rank}. miejsce", inline=True)
+    embed.add_field(name="Jest", value=f"{_medal(new_rank)} {new_rank}. miejsce", inline=True)
+    if points is not None:
+        embed.add_field(name="Punkty", value=f"**{points}**", inline=True)
+    _add_links(embed)
+    return embed
+
+
+def poll_embed(info: dict, votes: dict, closed: bool = False) -> discord.Embed:
+    ts = info.get("ts")
+    when = f"<t:{ts}:F> · <t:{ts}:R>" if ts else "—"
+    embed = _base(
+        "🗳️ Ankieta: kto może grać?",
+        C_NEUTRAL if closed else C_UPCOMING,
+        f"## PINDOLZ  ⚔️  {info.get('opp') or '???'}\n🕒 {when}",
+    )
+    groups: dict[str, list[str]] = {"yes": [], "no": [], "maybe": []}
+    for uid, vote in votes.items():
+        if vote in groups:
+            groups[vote].append(uid)
+    labels = {"yes": "✅ Mogę grać", "no": "❌ Nie mogę", "maybe": "❔ Może"}
+    for key in ("yes", "no", "maybe"):
+        ids = groups[key]
+        value = "\n".join(f"<@{u}>" for u in ids[:20]) or "—"
+        if len(ids) > 20:
+            value += f"\n… i {len(ids) - 20} więcej"
+        embed.add_field(name=f"{labels[key]} ({len(ids)})", value=value, inline=True)
+    if info.get("div"):
+        embed.add_field(name="🏷️ Dywizja", value=info["div"], inline=True)
+    if info.get("bo"):
+        embed.add_field(name="🎯 Format", value=f"Bo{info['bo']}", inline=True)
+    embed.set_footer(text="Ankieta zamknięta" if closed else "Kliknij ponownie ten sam przycisk, aby cofnąć głos")
+    return embed
+
+
 def help_embed() -> discord.Embed:
     embed = _base("📖 Komendy PINDOLZ bota", C_INFO)
     embed.add_field(
@@ -402,7 +447,11 @@ def help_embed() -> discord.Embed:
             "`/setup` · kanał główny\n"
             "`/setup-live` · kanał LIVE\n"
             "`/setup-tabela` · kanał tabeli\n"
-            "`/setup-all` · wszystkie kanały naraz"
+            "`/setup-all` · wszystkie kanały naraz\n"
+            "`/setup-ankiety` · kanał ankiet dostępności\n"
+            "`/ankieta-role` · role pingowane w ankiecie\n"
+            "`/ustawienia` · włączanie i wyłączanie funkcji\n"
+            "`/pokaz-embedy` · podgląd wszystkich kart"
         ),
         inline=False,
     )
@@ -414,7 +463,12 @@ def help_embed() -> discord.Embed:
             "📅 zmiana terminu meczu\n"
             "🏳️ wynik walkowerem (osobny styl)\n"
             "🏆 tabela: 08:00, 18:00, 20:00, 21:30, 23:00\n"
-            "🗓️ podsumowanie tygodnia (niedziela 20:00)"
+            "🗓️ podsumowanie tygodnia (niedziela 20:00)\n"
+            "🗳️ ankieta „Kto może grać?” gdy termin jest ustalony\n"
+            "🔔 przycisk „Przypomnij mi” pod kartą meczu (DM)\n"
+            "🧵 wątek z relacją LIVE\n"
+            "📈 awans lub spadek w tabeli\n"
+            "🚨 alert o awarii API (DM do właściciela)"
         ),
         inline=False,
     )
