@@ -127,6 +127,7 @@ FEATURES = {
     "events": ("Wydarzenia", "📆 Wydarzenie serwera Discord dla najbliższego meczu"),
     "gg": ("GG", "👏 Przycisk „GG” pod wynikiem"),
     "updates": ("Aktualizacje", "🆕 Powiadomienie o nowej wersji bota na GitHubie"),
+    "gif": ("GIF", "🎞️ Losowy GIF po wygranej (lista: /gif-dodaj)"),
     "reactions": ("Reakcje", "🎉 Reakcje 🎉/😢 pod wynikiem"),
     "status": ("Status", "🟢 Status bota (odliczanie, seria, LIVE)"),
     "live": ("LIVE", "🔴 Relacja LIVE na kanale LIVE"),
@@ -139,6 +140,21 @@ FEATURES = {
 
 def feature_on(name: str) -> bool:
     return db.get_config(f"feat_{name}") != "0"
+
+
+def _player_nicks() -> dict[int, str]:
+    """Powiązania: ID użytkownika Discord → nick gracza w lidze (/polacz)."""
+    try:
+        return {int(k): v for k, v in json.loads(db.get_config("player_links") or "{}").items()}
+    except Exception:
+        return {}
+
+
+def _win_gifs() -> list[str]:
+    try:
+        return [str(x) for x in json.loads(db.get_config("win_gifs") or "[]")]
+    except Exception:
+        return []
 
 
 def settings_embed() -> discord.Embed:
@@ -515,6 +531,7 @@ class PindolzBot(commands.Bot):
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None, view=gg_view(mid))
             await self._react_result(ch_id, msg_id, m)
+            await self._post_win_gif(ch_id, m)
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             if row and row.get("msg_live_id"):
                 try:
@@ -607,7 +624,7 @@ class PindolzBot(commands.Bot):
                 await self._send_reminder_dms(m)
             if channel and feature_on("prematch" if stage == self.PREMATCH_MINUTES else "prematch1h"):
                 try:
-                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing, minutes=stage, lineup=self._lineup_ids(mid)))
+                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing, minutes=stage, lineup=self._lineup_ids(mid), nicks=_player_nicks()))
                     print(f"[prematch] wysłano przypomnienie ({stage} min) o meczu {mid}")
                 except Exception as e:
                     db.set_config(key, None)
@@ -703,6 +720,7 @@ class PindolzBot(commands.Bot):
                     if main_ch:
                         msg_id, ch_id = await self._edit_or_send(main_ch, embeds.result_embed(match_data, form=form, standing=standing), None, None, view=gg_view(mid))
                         await self._react_result(ch_id, msg_id, match_data)
+                        await self._post_win_gif(ch_id, match_data)
                         db.upsert_match(mid, notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
                 db.upsert_match(mid, status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=match_data.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat())
             else:
@@ -940,7 +958,7 @@ class PindolzBot(commands.Bot):
                 user = self.get_user(uid) or await self.fetch_user(uid)
                 await user.send(
                     content="🔔 **Przypomnienie:** mecz PINDOLZ zaczyna się za około 30 minut!",
-                    embed=embeds.prematch_embed(match, lineup=self._lineup_ids(match.get("id"))),
+                    embed=embeds.prematch_embed(match, lineup=self._lineup_ids(match.get("id")), nicks=_player_nicks()),
                 )
             except Exception as e:
                 print(f"[remind] DM do {uid}: {e}")
@@ -1159,6 +1177,32 @@ class PindolzBot(commands.Bot):
         except Exception as e:
             print(f"[event] finish error: {e}")
 
+    # ---------- GIF PO WYGRANEJ ----------
+    async def _post_win_gif(self, ch_id, match: dict):
+        if not feature_on("gif") or not ch_id:
+            return
+        if self.api.did_pindolz_win(match) is not True or embeds._is_walkover(match):
+            return
+        dt = embeds._match_dt(match)
+        if dt and dt < datetime.now(TZ) - timedelta(hours=36):
+            return  # nie spamujemy GIF-ami przy nadrabianiu starszych wyników
+        gifs = _win_gifs()
+        if not gifs:
+            return
+        try:
+            last = int(db.get_config("win_gif_last") or -1)
+        except ValueError:
+            last = -1
+        choices = [i for i in range(len(gifs)) if i != last] or [0]
+        idx = random.choice(choices)
+        db.set_config("win_gif_last", str(idx))
+        try:
+            ch = await self.get_channel_safe(ch_id)
+            if ch:
+                await ch.send(gifs[idx])
+        except Exception as e:
+            print(f"[gif] send error: {e}")
+
     # ---------- SKŁAD NA MECZ ----------
     def _lineup_ids(self, mid) -> list[int]:
         if mid is None:
@@ -1171,10 +1215,12 @@ class PindolzBot(commands.Bot):
     @staticmethod
     def _lineup_names(guild, ids: list[int]) -> list[str]:
         names = []
+        nicks = _player_nicks()
         for uid in ids:
             member = guild.get_member(uid) if guild else None
             if member:
-                names.append(member.display_name)
+                nick = nicks.get(uid)
+                names.append(f"{member.display_name} ({nick})" if nick else member.display_name)
         return names
 
     @staticmethod
@@ -1482,9 +1528,9 @@ def _demo_embeds(user_id: int) -> list[tuple[str, discord.Embed]]:
     items = [
         ("Nadchodzące mecze", lambda: embeds.upcoming_embed([base])),
         ("Karta meczu", lambda: embeds.single_upcoming_embed(base)),
-        ("Skład na mecz", lambda: embeds.lineup_embed(base, [user_id, 111, 222])),
+        ("Skład na mecz", lambda: embeds.lineup_embed(base, [user_id, 111, 222], {user_id: "grabovsky"})),
         ("Przypomnienie 1 h", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing, minutes=60)),
-        ("Przypomnienie 30 min", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing, lineup=[user_id])),
+        ("Przypomnienie 30 min", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing, lineup=[user_id], nicks={user_id: "grabovsky"})),
         ("Ankieta dostępności", lambda: embeds.poll_embed(poll_info, votes)),
         ("Zmiana terminu", lambda: embeds.schedule_changed_embed(base, past.strftime("%Y-%m-%d"), "18:00:00")),
         ("LIVE", lambda: embeds.live_embed(live)),
@@ -1605,11 +1651,96 @@ async def cmd_sklad(
     players = [p for p in (gracz1, gracz2, gracz3, gracz4, gracz5, gracz6, gracz7) if p is not None]
     ids = list(dict.fromkeys(p.id for p in players))
     db.set_config(f"lineup_{m['id']}", json.dumps(ids))
-    await interaction.followup.send(embed=embeds.lineup_embed(m, ids))
+    await interaction.followup.send(embed=embeds.lineup_embed(m, ids, _player_nicks()))
     try:
         await bot.event_check.coro(bot)  # od razu odśwież opis wydarzenia serwera
     except Exception as e:
         print(f"[sklad] event: {e}")
+
+
+@bot.tree.command(name="polacz", description="Powiąż osobę z nickiem gracza w lidze (bez nicku usuwa; właściciel)")
+@app_commands.describe(osoba="Osoba na serwerze", nick="Nick gracza w lidze (puste = usuń powiązanie)")
+async def cmd_polacz(interaction: discord.Interaction, osoba: discord.Member, nick: Optional[str] = None):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    none = discord.AllowedMentions.none()
+    nicks = _player_nicks()
+    if nick is None or not nick.strip():
+        if nicks.pop(osoba.id, None) is None:
+            await interaction.response.send_message(f"{osoba.mention} nie ma powiązanego nicku.", ephemeral=True, allowed_mentions=none)
+            return
+        db.set_config("player_links", json.dumps({str(k): v for k, v in nicks.items()}))
+        await interaction.response.send_message(f"Usunięto powiązanie dla {osoba.mention}.", allowed_mentions=none)
+        return
+    nick = nick.strip()
+    if not 2 <= len(nick) <= 32 or "`" in nick or "\n" in nick:
+        await interaction.response.send_message("Nick musi mieć 2–32 znaki i nie może zawierać znaku ` ani nowej linii.", ephemeral=True)
+        return
+    taken = next((uid for uid, n in nicks.items() if uid != osoba.id and n.casefold() == nick.casefold()), None)
+    if taken:
+        await interaction.response.send_message(f"Nick `{nick}` jest już powiązany z <@{taken}>.", ephemeral=True, allowed_mentions=none)
+        return
+    nicks[osoba.id] = nick
+    db.set_config("player_links", json.dumps({str(k): v for k, v in nicks.items()}))
+    await interaction.response.send_message(f"🔗 Powiązano {osoba.mention} z nickiem `{nick}`.", allowed_mentions=none)
+
+
+@bot.tree.command(name="gracze", description="Lista graczy powiązanych z nickami w lidze")
+async def cmd_gracze(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embeds.players_embed(_player_nicks()))
+
+
+@bot.tree.command(name="gif-dodaj", description="Dodaj GIF lub obrazek do losowania po wygranej (właściciel)")
+@app_commands.describe(link="Link https:// do GIF-a lub obrazka (np. Tenor, Giphy, Imgur)")
+async def cmd_gif_dodaj(interaction: discord.Interaction, link: str):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    link = link.strip()
+    if not link.startswith("https://") or len(link) > 300 or any(c.isspace() for c in link):
+        await interaction.response.send_message("Podaj poprawny link zaczynający się od `https://` (bez spacji, do 300 znaków).", ephemeral=True)
+        return
+    gifs = _win_gifs()
+    if link in gifs:
+        await interaction.response.send_message("Ten link jest już na liście.", ephemeral=True)
+        return
+    if len(gifs) >= 50:
+        await interaction.response.send_message("Lista jest pełna (max 50). Usuń coś przez `/gif-usun`.", ephemeral=True)
+        return
+    gifs.append(link)
+    db.set_config("win_gifs", json.dumps(gifs))
+    await interaction.response.send_message(f"🎞️ Dodano jako #{len(gifs)} (na liście: {len(gifs)}). Podgląd:\n{link}", ephemeral=True)
+
+
+@bot.tree.command(name="gif-lista", description="Lista GIF-ów losowanych po wygranej (właściciel)")
+async def cmd_gif_lista(interaction: discord.Interaction):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    gifs = _win_gifs()
+    emb = embeds._base("🎞️ GIF-y po wygranej", embeds.C_INFO)
+    if gifs:
+        emb.description = "\n".join(f"**{i}.** {g[:70]}" for i, g in enumerate(gifs, 1))[:4000]
+    else:
+        emb.description = "Lista jest pusta. Dodaj pierwszy GIF komendą `/gif-dodaj`."
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+@bot.tree.command(name="gif-usun", description="Usuń GIF z listy po numerze (właściciel)")
+@app_commands.describe(numer="Numer z listy `/gif-lista`")
+async def cmd_gif_usun(interaction: discord.Interaction, numer: app_commands.Range[int, 1, 50]):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    gifs = _win_gifs()
+    if numer > len(gifs):
+        await interaction.response.send_message(f"Na liście jest tylko {len(gifs)} pozycji.", ephemeral=True)
+        return
+    removed = gifs.pop(numer - 1)
+    db.set_config("win_gifs", json.dumps(gifs))
+    db.set_config("win_gif_last", None)
+    await interaction.response.send_message(f"Usunięto #{numer}: {removed[:80]}\nPozostało: {len(gifs)}.", ephemeral=True)
 
 
 @bot.event
