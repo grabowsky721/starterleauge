@@ -26,6 +26,8 @@ class StarterLeagueClient:
                 "Accept": "application/json",
             }
         )
+        self.current_division: str = DIVISION_6
+        self.on_division = None  # callback(nazwa_dywizji), ustawiany przez bota
         self._cache: dict[str, tuple[float, Any]] = {}
         self._cache_ttl = {
             "live": 4,
@@ -114,27 +116,77 @@ class StarterLeagueClient:
         params = {"division": division} if division else None
         return self._get("/standings", params=params)
 
-    def get_division6_table(self) -> list[dict]:
+    def get_pindolz_division(self) -> str:
+        """Dywizja PINDOLZ wykrywana z meczów (live → nadchodzące → historia)."""
+        cached = self._cache_get("division")
+        if cached:
+            return cached
+        name = None
+        for fetch in (self.get_pindolz_live, self.get_pindolz_upcoming, self.get_pindolz_history):
+            try:
+                for m in fetch():
+                    if m.get("division"):
+                        name = m["division"]
+                        break
+            except Exception:
+                continue
+            if name:
+                break
+        return self._cache_set("division", name or DIVISION_6, ttl=600)
+
+    @staticmethod
+    def _extract_table(data: dict, division: str) -> list[dict]:
+        divisions = data.get("divisions") or []
+        for d in divisions:
+            if d.get("division") == division:
+                return d.get("table") or []
+        key = division.lower().replace(" ", "")
+        for d in divisions:
+            if (d.get("division") or "").lower().replace(" ", "") == key:
+                return d.get("table") or []
+        return []
+
+    @staticmethod
+    def _has_pindolz(table: list[dict]) -> bool:
+        for row in table:
+            team = row.get("team") or {}
+            if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
+                return True
+        return False
+
+    def get_division_table(self) -> list[dict]:
+        """Tabela dywizji, w której aktualnie gra PINDOLZ (wykrywana automatycznie)."""
         cached = self._cache_get("standings")
         if cached is not None:
             return cached
-        data = self.get_standings(DIVISION_6)
-        divisions = data.get("divisions") or []
-        table: list[dict] = []
-        for d in divisions:
-            if d.get("division") == DIVISION_6:
-                table = d.get("table") or []
-                break
-        if not table:
-            for d in divisions:
-                name = (d.get("division") or "").lower()
-                if "division 6" in name or "division6" in name:
-                    table = d.get("table") or []
-                    break
+        division = self.get_pindolz_division()
+        table = self._extract_table(self.get_standings(division), division)
+        if not self._has_pindolz(table):
+            # PINDOLZ nie ma w tej tabeli (np. po awansie) – szukamy go we wszystkich dywizjach
+            try:
+                for d in self.get_standings().get("divisions") or []:
+                    t = d.get("table") or []
+                    if self._has_pindolz(t):
+                        division, table = d.get("division") or division, t
+                        break
+            except Exception:
+                pass
+        if not table and division != DIVISION_6:
+            division = DIVISION_6
+            table = self._extract_table(self.get_standings(DIVISION_6), DIVISION_6)
+        self.current_division = division
+        if self.on_division:
+            try:
+                self.on_division(division)
+            except Exception:
+                pass
         return self._cache_set("standings", table)
 
+    # zgodność wsteczna (bot wywołuje tę nazwę w wielu miejscach)
+    get_division6_table = get_division_table
+
     def get_pindolz_standing(self) -> dict | None:
-        table = self.get_division6_table()
+        table = self.get_division_table()
         for row in table:
             team = row.get("team") or {}
             if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
