@@ -313,6 +313,50 @@ def poll_view(mid: int) -> discord.ui.View:
         view.add_item(PollButton(mid, vote))
     return view
 
+# ---------- Potwierdzenie składu (DM) ----------
+def _lineup_confirm_key(mid: int) -> str:
+    return f"lineup_confirm_{mid}"
+
+
+def _lineup_confirms(mid: int) -> dict[str, str]:
+    try:
+        return json.loads(db.get_config(_lineup_confirm_key(mid)) or "{}")
+    except Exception:
+        return {}
+
+
+def _set_lineup_confirms(mid: int, data: dict[str, str]) -> None:
+    db.set_config(_lineup_confirm_key(mid), json.dumps(data))
+
+
+class SkladConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_sklad:(?P<mid>\d+):(?P<ans>yes|no)"):
+    def __init__(self, mid: int, ans: str):
+        if ans == "yes":
+            label, style, emoji = "Gram", discord.ButtonStyle.success, "✅"
+        else:
+            label, style, emoji = "Nie mogę", discord.ButtonStyle.danger, "❌"
+        super().__init__(
+            discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"pindolz_sklad:{mid}:{ans}")
+        )
+        self.mid = mid
+        self.ans = ans
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["mid"]), match["ans"])
+
+    async def callback(self, interaction: discord.Interaction):
+        await bot.handle_sklad_confirm(interaction, self.mid, self.ans)
+
+
+def sklad_confirm_view(mid: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(SkladConfirmButton(mid, "yes"))
+    view.add_item(SkladConfirmButton(mid, "no"))
+    return view
+
+
+
 
 class PindolzBot(commands.Bot):
     def __init__(self):
@@ -335,7 +379,7 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         try:
-            self.add_dynamic_items(RemindButton, PollButton, GGButton)
+            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
         # Slash-komendy syncowane na końcu soft-startu (przed update_check)
@@ -572,6 +616,81 @@ class PindolzBot(commands.Bot):
         done.add("weekly")
         await self._boot_set_progress(done)
         print("[start] weekly_summary – soft-start zakończony")
+
+
+
+    async def handle_sklad_confirm(self, interaction: discord.Interaction, mid: int, ans: str):
+        """Gracz potwierdza / odmawia udziału w składzie (z DM)."""
+        uid = interaction.user.id
+        data = _lineup_confirms(mid)
+        ids_raw = db.get_config(f"lineup_{mid}") or "[]"
+        try:
+            roster = [int(x) for x in json.loads(ids_raw)]
+        except Exception:
+            roster = []
+        if uid not in roster:
+            await interaction.response.send_message(
+                "Nie jesteś na liście składu tego meczu.", ephemeral=True
+            )
+            return
+        data[str(uid)] = ans
+        _set_lineup_confirms(mid, data)
+
+        label = "Gram ✅" if ans == "yes" else "Nie mogę ❌"
+        try:
+            await interaction.response.edit_message(
+                content=f"Zapisano: **{label}**\nDzięki! Kapitan dostanie podsumowanie.",
+                embed=None,
+                view=None,
+            )
+        except Exception:
+            await interaction.response.send_message(f"Zapisano: **{label}**", ephemeral=True)
+
+        # Podsumowanie
+        yes, no, pending = [], [], []
+        for pid in roster:
+            st = data.get(str(pid))
+            mention = f"<@{pid}>"
+            if st == "yes":
+                yes.append(mention)
+            elif st == "no":
+                no.append(mention)
+            else:
+                pending.append(mention)
+
+        # DM do właściciela serwera (pierwszy guild bota z ownerem)
+        owner = None
+        guild = interaction.guild
+        if guild and guild.owner:
+            owner = guild.owner
+        if owner is None:
+            for g in self.guilds:
+                if g.owner_id:
+                    try:
+                        owner = g.get_member(g.owner_id) or await g.fetch_member(g.owner_id)
+                    except Exception:
+                        owner = None
+                    if owner:
+                        break
+
+        lines = [
+            f"**Mecz ID `{mid}`** – odpowiedź od <@{uid}>: **{label}**",
+            f"✅ Mogą grać ({len(yes)}): {', '.join(yes) or '—'}",
+            f"❌ Nie mogą ({len(no)}): {', '.join(no) or '—'}",
+            f"⏳ Brak odpowiedzi ({len(pending)}): {', '.join(pending) or '—'}",
+        ]
+        if not pending and yes and not no:
+            lines.insert(0, "🎉 **Cały skład potwierdził dostępność!**")
+        elif not pending:
+            lines.insert(0, "📋 **Wszyscy z składu odpowiedzieli.**")
+
+        text = "\n".join(lines)
+        if owner:
+            try:
+                await owner.send(text)
+            except Exception as e:
+                print(f"[sklad-dm-owner] {e}")
+        print(f"[sklad] confirm mid={mid} uid={uid} ans={ans}")
 
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
@@ -1844,7 +1963,7 @@ async def cmd_pokaz_embedy(interaction: discord.Interaction):
                     await interaction.followup.send(f"Nie udało się pokazać „{n}”: {err}", ephemeral=True)
 
 
-@bot.tree.command(name="sklad", description="Ustaw skład na najbliższy mecz (bez argumentów czyści; właściciel)")
+@bot.tree.command(name="sklad", description="Ustaw skład na najbliższy mecz + DM z prośbą o potwierdzenie (właściciel)")
 @app_commands.describe(
     gracz1="Gracz 1", gracz2="Gracz 2", gracz3="Gracz 3", gracz4="Gracz 4",
     gracz5="Gracz 5", gracz6="Gracz 6", gracz7="Gracz 7",
@@ -1873,10 +1992,58 @@ async def cmd_sklad(
         await interaction.followup.send("Brak nadchodzącego meczu z ustaloną datą, nie ma dla czego ustawić składu.")
         return
     _, m = nxt
+    mid = int(m["id"])
     players = [p for p in (gracz1, gracz2, gracz3, gracz4, gracz5, gracz6, gracz7) if p is not None]
     ids = list(dict.fromkeys(p.id for p in players))
-    db.set_config(f"lineup_{m['id']}", json.dumps(ids))
+    db.set_config(f"lineup_{mid}", json.dumps(ids))
+
+    # Reset potwierdzeń przy nowym składzie
+    if ids:
+        _set_lineup_confirms(mid, {str(i): "pending" for i in ids})
+    else:
+        _set_lineup_confirms(mid, {})
+
     await interaction.followup.send(embed=embeds.lineup_embed(m, ids, _player_nicks()))
+
+    # DM do każdego gracza: czy może grać?
+    dm_ok, dm_fail = [], []
+    opp = "?"
+    try:
+        t1, t2 = m.get("team1") or {}, m.get("team2") or {}
+        n1, n2 = t1.get("name") or "?", t2.get("name") or "?"
+        opp = n2 if "pindolz" in n1.lower() else n1
+    except Exception:
+        pass
+    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+
+    for member in players:
+        try:
+            emb = discord.Embed(
+                title="🎮 Potwierdzenie składu PINDOLZ",
+                description=(
+                    f"Zostałeś wpisany w skład na mecz.\n"
+                    f"**Rywal:** {opp}\n"
+                    f"**Termin:** {when}\n\n"
+                    f"Czy możesz grać? Kliknij poniżej."
+                ),
+                color=0x5865F2,
+            )
+            emb.set_footer(text=f"Mecz #{mid} · odpowiedź dostanie kapitan")
+            await member.send(embed=emb, view=sklad_confirm_view(mid))
+            dm_ok.append(member.mention)
+        except Exception:
+            dm_fail.append(member.mention)
+
+    summary = []
+    if dm_ok:
+        summary.append(f"DM wysłane do: {', '.join(dm_ok)}")
+    if dm_fail:
+        summary.append(f"Nie udało się wysłać DM (zamknięte PW?): {', '.join(dm_fail)}")
+    if not ids:
+        summary.append("Skład wyczyszczony – bez zapytań DM.")
+    if summary:
+        await interaction.followup.send("\n".join(summary), ephemeral=True)
+
     try:
         await bot.event_check.coro(bot)  # od razu odśwież opis wydarzenia serwera
     except Exception as e:
