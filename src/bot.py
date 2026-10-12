@@ -301,6 +301,7 @@ class PindolzBot(commands.Bot):
         self._status_current = None
         self._api_fail = 0
         self._api_alerted = False
+        self._boot_msg = None
         db.init_db()
 
     async def setup_hook(self):
@@ -313,55 +314,147 @@ class PindolzBot(commands.Bot):
         # Slash-komendy syncowane na końcu soft-startu (przed update_check)
         asyncio.create_task(self._soft_start_tasks())
 
+
+    BOOT_LABELS = (
+        ("live", "LIVE"),
+        ("prematch", "Przypomnienia"),
+        ("table", "Tabela"),
+        ("daily", "Daily"),
+        ("cleanup", "Cleanup"),
+        ("status", "Status"),
+        ("poll", "Ankiety"),
+        ("api", "API watch"),
+        ("event", "Eventy"),
+        ("commands", "Komendy slash"),
+        ("update", "Update GitHub"),
+        ("weekly", "Weekly"),
+    )
+
+    def _boot_progress_embed(self, done: set[str], current: str | None = None) -> discord.Embed:
+        lines = []
+        for key, label in self.BOOT_LABELS:
+            if key in done:
+                lines.append(f"✅ {label}")
+            elif key == current:
+                lines.append(f"🔄 {label}…")
+            else:
+                lines.append(f"⏳ {label}")
+        done_n = len(done)
+        total = len(self.BOOT_LABELS)
+        emb = embeds.restart_embed(
+            BOT_VERSION,
+            self._main_channel_id(),
+            self._live_channel_id(),
+            self._table_channel_id(),
+        )
+        emb.title = f"🚀 Start bota ({done_n}/{total})"
+        emb.description = f"Wersja **`{BOT_VERSION}`** · soft-start w toku"
+        if done_n >= total:
+            emb.title = f"✅ Bot gotowy ({total}/{total})"
+            emb.description = f"Wersja **`{BOT_VERSION}`** · wszystko załadowane"
+            emb.color = embeds.C_WIN if hasattr(embeds, "C_WIN") else emb.color
+        emb.add_field(name="Postęp ładowania", value="\n".join(lines), inline=False)
+        return emb
+
+    async def _boot_set_progress(self, done: set[str], current: str | None = None):
+        msg = getattr(self, "_boot_msg", None)
+        if not msg:
+            return
+        try:
+            await msg.edit(embed=self._boot_progress_embed(done, current))
+        except Exception as e:
+            print(f"[boot-msg] {e}")
+
+
     async def _soft_start_tasks(self):
         await self.wait_until_ready()
         print("[start] soft-start według harmonogramu (~3 min 40 s)...")
+        done: set[str] = set()
 
+        async def step(key: str, delay_before: float, start_fn):
+            await self._boot_set_progress(done, current=key)
+            if delay_before > 0:
+                await asyncio.sleep(delay_before)
+            await self._boot_set_progress(done, current=key)
+            start_fn()
+            done.add(key)
+            await self._boot_set_progress(done, current=None)
+            print(f"[start] {key}")
+
+        # delays are gaps between steps (first = START_DELAY_LIVE)
+        await self._boot_set_progress(done, current="live")
         await asyncio.sleep(START_DELAY_LIVE)
         if not self.live_check.is_running():
             self.live_check.start()
-            print("[start] live_check")
+        done.add("live")
+        await self._boot_set_progress(done)
+        print("[start] live_check")
 
+        await self._boot_set_progress(done, current="prematch")
         await asyncio.sleep(START_DELAY_PREMATCH - START_DELAY_LIVE)
         if not self.prematch_check.is_running():
             self.prematch_check.start()
-            print("[start] prematch_check")
+        done.add("prematch")
+        await self._boot_set_progress(done)
+        print("[start] prematch_check")
 
+        await self._boot_set_progress(done, current="table")
         await asyncio.sleep(START_DELAY_TABLE - START_DELAY_PREMATCH)
         if not self.table_update.is_running():
             self.table_update.start()
-            print("[start] table_update")
+        done.add("table")
+        await self._boot_set_progress(done)
+        print("[start] table_update")
 
+        await self._boot_set_progress(done, current="daily")
         await asyncio.sleep(START_DELAY_DAILY - START_DELAY_TABLE)
         if not self.daily_check.is_running():
             self.daily_check.start()
-            print("[start] daily_check")
+        done.add("daily")
+        await self._boot_set_progress(done)
+        print("[start] daily_check")
 
+        await self._boot_set_progress(done, current="cleanup")
         await asyncio.sleep(START_DELAY_CLEANUP - START_DELAY_DAILY)
         if not self.cleanup_task.is_running():
             self.cleanup_task.start()
-            print("[start] cleanup_task")
+        done.add("cleanup")
+        await self._boot_set_progress(done)
+        print("[start] cleanup_task")
 
+        await self._boot_set_progress(done, current="status")
         await asyncio.sleep(START_DELAY_STATUS - START_DELAY_CLEANUP)
         if not self.status_loop.is_running():
             self.status_loop.start()
-            print("[start] status_loop")
+        done.add("status")
+        await self._boot_set_progress(done)
+        print("[start] status_loop")
 
+        await self._boot_set_progress(done, current="poll")
         await asyncio.sleep(START_DELAY_POLL - START_DELAY_STATUS)
         if not self.poll_check.is_running():
             self.poll_check.start()
-            print("[start] poll_check")
+        done.add("poll")
+        await self._boot_set_progress(done)
+        print("[start] poll_check")
 
+        await self._boot_set_progress(done, current="api")
         await asyncio.sleep(START_DELAY_API - START_DELAY_POLL)
         if not self.api_watch.is_running():
             self.api_watch.start()
-            print("[start] api_watch")
+        done.add("api")
+        await self._boot_set_progress(done)
+        print("[start] api_watch")
 
+        await self._boot_set_progress(done, current="event")
         await asyncio.sleep(START_DELAY_EVENT - START_DELAY_API)
         if not self.event_check.is_running():
             self.event_check.start()
-            print("[start] event_check")
+        done.add("event")
+        await self._boot_set_progress(done)
+        print("[start] event_check")
 
+        await self._boot_set_progress(done, current="commands")
         await asyncio.sleep(START_DELAY_COMMANDS - START_DELAY_EVENT)
         try:
             for guild in self.guilds:
@@ -374,16 +467,25 @@ class PindolzBot(commands.Bot):
             print(f"[sync] global: {len(synced)} komend")
         except Exception as e:
             print(f"[sync] blad: {e}")
+        done.add("commands")
+        await self._boot_set_progress(done)
+        print("[start] commands sync")
 
+        await self._boot_set_progress(done, current="update")
         await asyncio.sleep(START_DELAY_UPDATE - START_DELAY_COMMANDS)
         if not self.update_check.is_running():
             self.update_check.start()
-            print("[start] update_check")
+        done.add("update")
+        await self._boot_set_progress(done)
+        print("[start] update_check")
 
+        await self._boot_set_progress(done, current="weekly")
         await asyncio.sleep(START_DELAY_WEEKLY - START_DELAY_UPDATE)
         if not self.weekly_summary.is_running():
             self.weekly_summary.start()
-            print("[start] weekly_summary – soft-start zakończony")
+        done.add("weekly")
+        await self._boot_set_progress(done)
+        print("[start] weekly_summary – soft-start zakończony")
 
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
@@ -1798,13 +1900,9 @@ async def on_ready():
         if not channel:
             return
         try:
-            emb = embeds.restart_embed(
-                BOT_VERSION,
-                bot._main_channel_id(),
-                bot._live_channel_id(),
-                bot._table_channel_id(),
-            )
+            emb = bot._boot_progress_embed(set(), current="live")
             msg = await channel.send(embed=emb)
+            bot._boot_msg = msg
 
             async def _delete_later():
                 await asyncio.sleep(600)
