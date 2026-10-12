@@ -1,3 +1,8 @@
+
+
+bot.py
+
+Pliki
 import asyncio
 import json
 import os
@@ -66,6 +71,33 @@ START_DELAY_EVENT = 160
 START_DELAY_COMMANDS = 180
 START_DELAY_UPDATE = 200
 START_DELAY_WEEKLY = 220
+
+# Kolejność startu komend slash (po jednej, co COMMAND_START_GAP s)
+COMMAND_START_GAP = 10
+COMMAND_START_ORDER = [
+    "pomoc",
+    "setup",
+    "setup-live",
+    "setup-tabela",
+    "setup-ankiety",
+    "setup-all",
+    "status",
+    "wersja",
+    "ankieta-role",
+    "sklad",
+    "polacz",
+    "gracze",
+    "tabela",
+    "nadchodzace",
+    "wyniki",
+    "pindolz",
+    "live",
+    "ustawienia",
+    "pokaz-embedy",
+    "gif-dodaj",
+    "gif-lista",
+    "gif-usun",
+]
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
 STATUS_PHRASES = [
@@ -456,6 +488,39 @@ class PindolzBot(commands.Bot):
 
         await self._boot_set_progress(done, current="commands")
         await asyncio.sleep(START_DELAY_COMMANDS - START_DELAY_EVENT)
+        cmd_done: list[str] = []
+        for name in COMMAND_START_ORDER:
+            # aktualizuj wiadomość startową: aktualna komenda
+            try:
+                msg = getattr(self, "_boot_msg", None)
+                if msg:
+                    emb = self._boot_progress_embed(done, current="commands")
+                    # lista komend
+                    clines = []
+                    for n in COMMAND_START_ORDER:
+                        if n in cmd_done:
+                            clines.append(f"✅ /{n}")
+                        elif n == name:
+                            clines.append(f"🔄 /{n}…")
+                        else:
+                            clines.append(f"⏳ /{n}")
+                    mid = (len(clines) + 1) // 2
+                    emb.add_field(
+                        name=f"Komendy ({len(cmd_done)}/{len(COMMAND_START_ORDER)})",
+                        value="\n".join(clines[:mid]),
+                        inline=True,
+                    )
+                    emb.add_field(
+                        name="\u200b",
+                        value="\n".join(clines[mid:]),
+                        inline=True,
+                    )
+                    await msg.edit(embed=emb)
+            except Exception as e:
+                print(f"[boot-cmd] {e}")
+            await asyncio.sleep(COMMAND_START_GAP)
+            cmd_done.append(name)
+            print(f"[start] komenda /{name}")
         try:
             for guild in self.guilds:
                 try:
@@ -468,8 +533,22 @@ class PindolzBot(commands.Bot):
         except Exception as e:
             print(f"[sync] blad: {e}")
         done.add("commands")
-        await self._boot_set_progress(done)
-        print("[start] commands sync")
+        try:
+            msg = getattr(self, "_boot_msg", None)
+            if msg:
+                emb = self._boot_progress_embed(done)
+                clines = [f"✅ /{n}" for n in COMMAND_START_ORDER]
+                mid = (len(clines) + 1) // 2
+                emb.add_field(
+                    name=f"Komendy ({len(cmd_done)}/{len(COMMAND_START_ORDER)})",
+                    value="\n".join(clines[:mid]),
+                    inline=True,
+                )
+                emb.add_field(name="\u200b", value="\n".join(clines[mid:]), inline=True)
+                await msg.edit(embed=emb)
+        except Exception as e:
+            print(f"[boot-cmd] {e}")
+        print("[start] commands sync – wszystkie komendy")
 
         await self._boot_set_progress(done, current="update")
         await asyncio.sleep(START_DELAY_UPDATE - START_DELAY_COMMANDS)
@@ -992,18 +1071,6 @@ class PindolzBot(commands.Bot):
             else:
                 word = self._pl_plural(streak, "porażka", "porażki", "porażek")
                 statuses.append(f"📉 {streak} {word} z rzędu")
-
-        # Dni bez porażki (od daty ostatniej porażki, tylko gdy ostatni mecz był wygrany)
-        if first:
-            last_loss = next(
-                (m for m in history if m.get("winnerTeamId") is not None and m.get("winnerTeamId") != PINDOLZ_TEAM_ID),
-                None,
-            )
-            loss_dt = embeds._match_dt(last_loss) if last_loss else None
-            if loss_dt:
-                days = (now.date() - loss_dt.date()).days
-                if days >= 2:
-                    statuses.append(f"🛡️ {days} dni bez porażki")
 
         # Winrate i strata do lidera (z tabeli)
         try:
