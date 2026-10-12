@@ -1,8 +1,3 @@
-
-
-bot.py
-
-Pliki
 import asyncio
 import json
 import os
@@ -489,13 +484,19 @@ class PindolzBot(commands.Bot):
         await self._boot_set_progress(done, current="commands")
         await asyncio.sleep(START_DELAY_COMMANDS - START_DELAY_EVENT)
         cmd_done: list[str] = []
+        total_cmds = len(COMMAND_START_ORDER)
         for name in COMMAND_START_ORDER:
-            # aktualizuj wiadomość startową: aktualna komenda
+            # aktualizuj wiadomość startową: komendy ładują się (n/22)
             try:
                 msg = getattr(self, "_boot_msg", None)
                 if msg:
                     emb = self._boot_progress_embed(done, current="commands")
-                    # lista komend
+                    idx = len(cmd_done) + 1
+                    emb.title = f"🚀 Start bota · komendy {idx}/{total_cmds}"
+                    emb.description = (
+                        f"Wersja **`{BOT_VERSION}`** · **ładuję komendy** "
+                        f"(`{idx}/{total_cmds}`) · teraz **`/{name}`**"
+                    )
                     clines = []
                     for n in COMMAND_START_ORDER:
                         if n in cmd_done:
@@ -506,7 +507,7 @@ class PindolzBot(commands.Bot):
                             clines.append(f"⏳ /{n}")
                     mid = (len(clines) + 1) // 2
                     emb.add_field(
-                        name=f"Komendy ({len(cmd_done)}/{len(COMMAND_START_ORDER)})",
+                        name=f"Komendy ({len(cmd_done)}/{total_cmds})",
                         value="\n".join(clines[:mid]),
                         inline=True,
                     )
@@ -520,7 +521,7 @@ class PindolzBot(commands.Bot):
                 print(f"[boot-cmd] {e}")
             await asyncio.sleep(COMMAND_START_GAP)
             cmd_done.append(name)
-            print(f"[start] komenda /{name}")
+            print(f"[start] komenda /{name} ({len(cmd_done)}/{total_cmds})")
         try:
             for guild in self.guilds:
                 try:
@@ -537,10 +538,16 @@ class PindolzBot(commands.Bot):
             msg = getattr(self, "_boot_msg", None)
             if msg:
                 emb = self._boot_progress_embed(done)
+                total_cmds = len(COMMAND_START_ORDER)
+                emb.title = f"🚀 Start bota · komendy {total_cmds}/{total_cmds}"
+                emb.description = (
+                    f"Wersja **`{BOT_VERSION}`** · **komendy załadowane** "
+                    f"(`{total_cmds}/{total_cmds}`) · sync na Discord…"
+                )
                 clines = [f"✅ /{n}" for n in COMMAND_START_ORDER]
                 mid = (len(clines) + 1) // 2
                 emb.add_field(
-                    name=f"Komendy ({len(cmd_done)}/{len(COMMAND_START_ORDER)})",
+                    name=f"Komendy ({total_cmds}/{total_cmds})",
                     value="\n".join(clines[:mid]),
                     inline=True,
                 )
