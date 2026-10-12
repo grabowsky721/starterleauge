@@ -993,6 +993,18 @@ class PindolzBot(commands.Bot):
                 word = self._pl_plural(streak, "porażka", "porażki", "porażek")
                 statuses.append(f"📉 {streak} {word} z rzędu")
 
+        # Dni bez porażki (od daty ostatniej porażki, tylko gdy ostatni mecz był wygrany)
+        if first:
+            last_loss = next(
+                (m for m in history if m.get("winnerTeamId") is not None and m.get("winnerTeamId") != PINDOLZ_TEAM_ID),
+                None,
+            )
+            loss_dt = embeds._match_dt(last_loss) if last_loss else None
+            if loss_dt:
+                days = (now.date() - loss_dt.date()).days
+                if days >= 2:
+                    statuses.append(f"🛡️ {days} dni bez porażki")
+
         # Winrate i strata do lidera (z tabeli)
         try:
             table = await asyncio.to_thread(self.api.get_division6_table)
