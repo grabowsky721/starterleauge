@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import random
-import re
 import requests
 import sys
 
@@ -69,7 +68,7 @@ START_DELAY_UPDATE = 200
 START_DELAY_WEEKLY = 220
 
 # Kolejność startu komend slash (po jednej, co COMMAND_START_GAP s)
-COMMAND_START_GAP = 10
+COMMAND_START_GAP = 2
 COMMAND_START_ORDER = [
     "pomoc",
     "setup",
@@ -170,9 +169,6 @@ FEATURES = {
     "polls": ("Ankiety", "🗳️ Ankieta „Kto może grać?”"),
     "rank": ("Awans/spadek", "📈 Powiadomienie o zmianie miejsca w tabeli"),
     "alerts": ("Alerty API", "🚨 Wiadomość prywatna o awarii API"),
-    "newmatch": ("Nowy mecz", "🆕 Ogłoszenie nowego meczu lub ustalonego terminu"),
-    "delay": ("Opóźnienie", "⏳ Alert (DM do kapitana), gdy mecz nie ruszył 15 min po planie"),
-    "report": ("Raport kapitana", "📋 Poniedziałkowy raport w DM do kapitana"),
 }
 
 
@@ -193,45 +189,6 @@ def _win_gifs() -> list[str]:
         return [str(x) for x in json.loads(db.get_config("win_gifs") or "[]")]
     except Exception:
         return []
-
-
-def _index_list(key: str) -> list[int]:
-    try:
-        return [int(x) for x in json.loads(db.get_config(key) or "[]")]
-    except Exception:
-        return []
-
-
-def _index_add(key: str, value: int, cap: int = 200) -> None:
-    items = _index_list(key)
-    if value not in items:
-        items.append(int(value))
-    db.set_config(key, json.dumps(items[-cap:]))
-
-
-def _sched_list() -> list[dict]:
-    try:
-        return list(json.loads(db.get_config("sched_msgs") or "[]"))
-    except Exception:
-        return []
-
-
-def _parse_when(data: str, godzina: str):
-    m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?", (data or "").strip())
-    t = re.fullmatch(r"(\d{1,2}):(\d{2})", (godzina or "").strip())
-    if not m or not t:
-        return None
-    d, mo, hh, mm = int(m[1]), int(m[2]), int(t[1]), int(t[2])
-    now = datetime.now(TZ)
-    try:
-        if m[3]:
-            return datetime(int(m[3]), mo, d, hh, mm, tzinfo=TZ)
-        dt = datetime(now.year, mo, d, hh, mm, tzinfo=TZ)
-        if dt < now - timedelta(minutes=1):
-            dt = datetime(now.year + 1, mo, d, hh, mm, tzinfo=TZ)
-        return dt
-    except ValueError:
-        return None
 
 
 def settings_embed() -> discord.Embed:
@@ -425,7 +382,12 @@ class PindolzBot(commands.Bot):
             self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
-        # Slash-komendy syncowane na końcu soft-startu (przed update_check)
+        # Komendy slash – od razu przy starcie (nie czekają na soft-start)
+        try:
+            synced = await self.tree.sync()
+            print(f"[sync] global: {len(synced)} komend -> {[c.name for c in synced]}")
+        except Exception as e:
+            print(f"[sync] global blad: {e}")
         asyncio.create_task(self._soft_start_tasks())
 
 
@@ -609,17 +571,8 @@ class PindolzBot(commands.Bot):
             await asyncio.sleep(COMMAND_START_GAP)
             cmd_done.append(name)
             print(f"[start] komenda /{name} ({len(cmd_done)}/{total_cmds})")
-        try:
-            for guild in self.guilds:
-                try:
-                    synced = await self.tree.sync(guild=guild)
-                    print(f"[sync] {guild.name}: {len(synced)} komend")
-                except Exception as e:
-                    print(f"[sync] guild {guild.id}: {e}")
-            synced = await self.tree.sync()
-            print(f"[sync] global: {len(synced)} komend")
-        except Exception as e:
-            print(f"[sync] blad: {e}")
+        # Sync był już w setup_hook / on_ready – tu tylko UI postępu
+        print("[start] komendy: sync już wykonany przy starcie")
         done.add("commands")
         try:
             msg = getattr(self, "_boot_msg", None)
@@ -659,12 +612,6 @@ class PindolzBot(commands.Bot):
         done.add("weekly")
         await self._boot_set_progress(done)
         print("[start] weekly_summary – soft-start zakończony")
-
-        # dodatkowe zadania (nie wchodzą do paska postępu)
-        for loop in (self.schedule_watch, self.delay_check, self.scheduled_messages, self.captain_report):
-            if not loop.is_running():
-                loop.start()
-        print("[start] schedule_watch, delay_check, scheduled_messages, captain_report")
 
 
 
@@ -919,12 +866,7 @@ class PindolzBot(commands.Bot):
                 old_s1, old_s2 = row.get("score_team1"), row.get("score_team2")
                 new_s1, new_s2 = score.get("team1"), score.get("team2")
                 if (old_s1, old_s2) != (new_s1, new_s2) and new_s1 is not None:
-                    orig = db.get_config(f"result_orig_{mid}")
-                    if not orig and old_s1 is not None and old_s2 is not None:
-                        orig = f"{old_s1}:{old_s2}"
-                        db.set_config(f"result_orig_{mid}", orig)
-                    corr = orig if orig and orig != f"{new_s1}:{new_s2}" else None
-                    msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing, correction=corr), row.get("msg_result_id"), row.get("msg_result_ch"), view=gg_view(mid))
+                    msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), row.get("msg_result_id"), row.get("msg_result_ch"), view=gg_view(mid))
                     db.upsert_match(mid, score_team1=new_s1, score_team2=new_s2, winner_team_id=m.get("winnerTeamId"), msg_result_id=msg_id, msg_result_ch=ch_id, status="finished")
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None, view=gg_view(mid))
@@ -1436,7 +1378,6 @@ class PindolzBot(commands.Bot):
                 print(f"[poll] send error: {e}")
                 return
             db.set_config(f"poll_msg_{mid}", f"{channel.id}:{msg.id}")
-            _index_add("poll_index", mid)
             db.set_config(f"poll_info_{mid}", json.dumps(info))
             db.set_config(f"poll_votes_{mid}", "{}")
             print(f"[poll] wysłano ankietę dla meczu {mid}")
@@ -1672,261 +1613,6 @@ class PindolzBot(commands.Bot):
 
     @update_check.before_loop
     async def before_update_check(self):
-        await self.wait_until_ready()
-
-    # ---------- KAPITAN (DM) ----------
-    async def _dm_captain(self, content: str | None = None, embed: discord.Embed | None = None) -> bool:
-        try:
-            cid = db.get_config_int("captain_id")
-            if cid:
-                user = self.get_user(cid) or await self.fetch_user(cid)
-            else:
-                user = (await self.application_info()).owner
-            await user.send(content=content, embed=embed)
-            return True
-        except Exception as e:
-            print(f"[captain] nie udało się wysłać DM: {e}")
-            return False
-
-    # ---------- NOWY MECZ / USTALONY TERMIN ----------
-    @tasks.loop(minutes=2)
-    async def schedule_watch(self):
-        if not feature_on("newmatch"):
-            return
-        channel = await self.get_channel_safe(self._main_channel_id())
-        if not channel:
-            return
-        try:
-            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
-        except Exception as e:
-            print(f"[schedule] API error: {e}")
-            return
-        raw = db.get_config("seen_matches")
-        now = datetime.now(TZ)
-        has_date = lambda m: bool(m.get("matchDate") and m.get("matchTime"))
-        if raw is None:  # pierwszy start: zapamiętaj istniejące mecze, nic nie ogłaszaj
-            ids = [m["id"] for m in upcoming if m.get("id") is not None]
-            db.set_config("seen_matches", json.dumps(ids[-300:]))
-            db.set_config("dated_matches", json.dumps([m["id"] for m in upcoming if m.get("id") is not None and has_date(m)][-300:]))
-            return
-        seen = set(_index_list("seen_matches"))
-        dated = set(_index_list("dated_matches"))
-        for m in upcoming:
-            mid = m.get("id")
-            if mid is None:
-                continue
-            dt = embeds._match_dt(m) if has_date(m) else None
-            if dt and dt <= now:
-                seen.add(mid)
-                dated.add(mid)
-                continue
-            if mid not in seen:
-                try:
-                    await channel.send(embed=embeds.new_match_embed(m))
-                except Exception as e:
-                    print(f"[schedule] send error: {e}")
-                    continue
-                seen.add(mid)
-                if has_date(m):
-                    dated.add(mid)
-            elif has_date(m) and mid not in dated:
-                try:
-                    await channel.send(embed=embeds.new_match_embed(m, dated=True))
-                except Exception as e:
-                    print(f"[schedule] send error: {e}")
-                    continue
-                dated.add(mid)
-        db.set_config("seen_matches", json.dumps(sorted(seen)[-300:]))
-        db.set_config("dated_matches", json.dumps(sorted(dated)[-300:]))
-
-    @schedule_watch.before_loop
-    async def before_schedule_watch(self):
-        await self.wait_until_ready()
-
-    # ---------- OPÓŹNIONY START MECZU ----------
-    @tasks.loop(minutes=2)
-    async def delay_check(self):
-        if not feature_on("delay"):
-            return
-        try:
-            upcoming = await asyncio.to_thread(self._upcoming_cached)
-        except Exception as e:
-            print(f"[delay] API error: {e}")
-            return
-        now = datetime.now(TZ)
-        cands = []
-        for m in upcoming:
-            mid = m.get("id")
-            dt = embeds._match_dt(m) if (m.get("matchDate") and m.get("matchTime")) else None
-            if mid is None or dt is None or db.get_config(f"delay_{mid}"):
-                continue
-            late = (now - dt).total_seconds() / 60
-            if 15 <= late <= 180:
-                cands.append((int(late), m))
-        if not cands:
-            return
-        try:
-            lives = await asyncio.to_thread(self.api.get_pindolz_live)
-        except Exception:
-            return  # bez pewności, czy trwa LIVE, nie alarmujemy
-        live_ids = {x.get("id") for x in lives}
-        for late, m in cands:
-            mid = m["id"]
-            if mid in live_ids or (db.get_match(mid) or {}).get("status") in ("live", "finished"):
-                continue
-            db.set_config(f"delay_{mid}", "1")
-            emb = embeds.delay_embed(m, late)
-            sent = await self._dm_captain(content="⏳ Mecz powinien już trwać, a LIVE nie widać.", embed=emb)
-            if not sent:
-                ch = await self.get_channel_safe(self._main_channel_id())
-                if ch:
-                    try:
-                        await ch.send(embed=emb)
-                    except Exception as e:
-                        print(f"[delay] send error: {e}")
-            print(f"[delay] alert o opóźnieniu meczu {mid} ({late} min)")
-
-    @delay_check.before_loop
-    async def before_delay_check(self):
-        await self.wait_until_ready()
-
-    # ---------- KARTA GRACZA ----------
-    def _player_stats(self, uid: int) -> dict:
-        now_ts = datetime.now(TZ).timestamp()
-        yes = no = maybe = polls = 0
-        for mid in _index_list("poll_index"):
-            ts = self._poll_info(mid).get("ts")
-            if ts and ts > now_ts:
-                continue  # liczymy tylko zamknięte ankiety
-            polls += 1
-            vote = self._poll_votes(mid).get(str(uid))
-            if vote == "yes":
-                yes += 1
-            elif vote == "no":
-                no += 1
-            elif vote == "maybe":
-                maybe += 1
-        lineups = _index_list("lineup_index")
-        return {
-            "polls": polls, "yes": yes, "no": no, "maybe": maybe,
-            "lineups": len(lineups), "in_lineup": sum(1 for mid in lineups if uid in self._lineup_ids(mid)),
-        }
-
-    # ---------- RAPORT KAPITANA ----------
-    async def _build_report(self, save_rank: bool = False) -> discord.Embed:
-        now = datetime.now(TZ)
-        sections: list[tuple[str, str]] = []
-        warnings: list[str] = []
-        try:
-            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
-        except Exception:
-            upcoming = []
-            warnings.append("API nie odpowiada, dane mogą być niepełne.")
-        dated, undated = [], []
-        for m in upcoming:
-            if m.get("id") is None:
-                continue
-            dt = embeds._match_dt(m) if (m.get("matchDate") and m.get("matchTime")) else None
-            if dt is None:
-                undated.append(m)
-            elif dt > now:
-                dated.append((dt, m))
-        dated.sort(key=lambda x: x[0])
-        lines = [f"<t:{int(dt.timestamp())}:F> · vs **{self._opponent(m)}**" for dt, m in dated[:3]]
-        for m in undated[:3]:
-            lines.append(f"⚠️ termin nieustalony · vs **{self._opponent(m)}**")
-            warnings.append(f"Ustalcie termin meczu z {self._opponent(m)}.")
-        sections.append(("📅 Najbliższe mecze", "\n".join(lines) or "Brak zaplanowanych meczów."))
-        if dated:
-            dt, m = dated[0]
-            mid, opp = m["id"], self._opponent(m)
-            if self._poll_info(mid):
-                votes = list(self._poll_votes(mid).values())
-                y, n, mb = votes.count("yes"), votes.count("no"), votes.count("maybe")
-                sections.append(("🗳️ Ankieta (najbliższy mecz)", f"✅ {y} · ❌ {n} · ❔ {mb}"))
-                if dt - now < timedelta(hours=48) and y == 0:
-                    warnings.append(f"Nikt jeszcze nie potwierdził gry w meczu z {opp}.")
-            elif not db.get_config_int("poll_channel_id"):
-                warnings.append("Nie ustawiono kanału ankiet (`/setup-ankiety`).")
-            else:
-                sections.append(("🗳️ Ankieta (najbliższy mecz)", "Jeszcze nie wysłana."))
-            lineup = self._lineup_ids(mid)
-            if lineup:
-                sections.append(("👥 Skład (najbliższy mecz)", " ".join(f"<@{u}>" for u in lineup)))
-            else:
-                warnings.append(f"Nie ustawiono składu na mecz z {opp} (`/sklad`).")
-        try:
-            history = await asyncio.to_thread(self.api.get_pindolz_history)
-        except Exception:
-            history = []
-        week = [m for m in history if (embeds._match_dt(m) and now - embeds._match_dt(m) <= timedelta(days=7))]
-        wins = sum(1 for m in week if m.get("winnerTeamId") == PINDOLZ_TEAM_ID)
-        losses = sum(1 for m in week if m.get("winnerTeamId") not in (None, PINDOLZ_TEAM_ID))
-        wlines = [
-            f"{embeds._icon(embeds._result(m))} {embeds._team_name(m, 'team1')} {embeds._score_str(m)} {embeds._team_name(m, 'team2')}"
-            for m in week[:5]
-        ]
-        sections.append(("📜 Ostatnie 7 dni", f"**{wins}W – {losses}L**" + ("\n" + "\n".join(wlines) if wlines else "\nBrak meczów.")))
-        try:
-            table = await asyncio.to_thread(self.api.get_division6_table)
-        except Exception:
-            table = []
-        us = next((r for r in table if ((r.get("team") or {}).get("name") or "").upper() == "PINDOLZ"), None)
-        if us and us.get("rank") is not None:
-            rank = us["rank"]
-            prev = db.get_config_int("report_rank_prev")
-            delta = ""
-            if prev and prev != rank:
-                delta = f" · {'▲' if rank < prev else '▼'}{abs(prev - rank)} vs poprzedni raport"
-            sections.append(("🏆 Tabela", f"{embeds._medal(rank)} **{rank}.** miejsce · **{us.get('points', '–')}** pkt{delta}"))
-            if save_rank:
-                db.set_config("report_rank_prev", str(rank))
-        return embeds.captain_report_embed(sections, warnings)
-
-    @tasks.loop(time=time(9, 0, tzinfo=TZ))
-    async def captain_report(self):
-        if datetime.now(TZ).weekday() != 0 or not feature_on("report"):
-            return
-        emb = await self._build_report(save_rank=True)
-        await self._dm_captain(embed=emb)
-        print("[report] wysłano raport kapitana")
-
-    @captain_report.before_loop
-    async def before_captain_report(self):
-        await self.wait_until_ready()
-
-    # ---------- ZAPLANOWANE WIADOMOŚCI ----------
-    @tasks.loop(minutes=1)
-    async def scheduled_messages(self):
-        items = _sched_list()
-        if not items:
-            return
-        now_ts = datetime.now(TZ).timestamp()
-        due = sorted((i for i in items if i.get("ts", 0) <= now_ts), key=lambda i: i["ts"])
-        if not due:
-            return
-        db.set_config("sched_msgs", json.dumps([i for i in items if i.get("ts", 0) > now_ts]))  # najpierw usuń, by nie wysłać dwa razy
-        for it in due:
-            text = it.get("text") or ""
-            if now_ts - it["ts"] > 12 * 3600:
-                await self._dm_owner(f"⏰ Pominięto zaplanowaną wiadomość #{it.get('id')} (bot był offline ponad 12 h): {text[:200]}")
-                continue
-            ch = await self.get_channel_safe(it.get("ch"))
-            rid = it.get("role")
-            try:
-                if not ch:
-                    raise RuntimeError("nie znaleziono kanału")
-                await ch.send(
-                    ((f"<@&{rid}> " if rid else "") + text)[:2000],
-                    allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=[discord.Object(id=rid)] if rid else False),
-                )
-                print(f"[sched] wysłano zaplanowaną wiadomość #{it.get('id')}")
-            except Exception as e:
-                print(f"[sched] send error: {e}")
-                await self._dm_owner(f"⏰ Nie udało się wysłać zaplanowanej wiadomości #{it.get('id')}: {e}\n{text[:200]}")
-
-    @scheduled_messages.before_loop
-    async def before_scheduled_messages(self):
         await self.wait_until_ready()
 
     # ---------- ALERT O AWARII API ----------
@@ -2187,12 +1873,6 @@ def _demo_embeds(user_id: int) -> list[tuple[str, discord.Embed]]:
         ("Przypomnienie 30 min", lambda: embeds.prematch_embed(base, form="WWLWL", standing=standing, opp_standing=opp_standing, lineup=[user_id], nicks={user_id: "grabovsky"})),
         ("Ankieta dostępności", lambda: embeds.poll_embed(poll_info, votes)),
         ("Zmiana terminu", lambda: embeds.schedule_changed_embed(base, past.strftime("%Y-%m-%d"), "18:00:00")),
-        ("Nowy mecz", lambda: embeds.new_match_embed(base)),
-        ("Ustalono termin", lambda: embeds.new_match_embed(base, dated=True)),
-        ("Mecz opóźniony", lambda: embeds.delay_embed(base, 18)),
-        ("Korekta wyniku", lambda: embeds.result_embed(win, form="WWLWW", standing=standing, correction="2:1")),
-        ("Karta gracza", lambda: embeds.player_card_embed("Grabek", "grabovsky", {"polls": 8, "yes": 6, "no": 1, "maybe": 1, "lineups": 5, "in_lineup": 4})),
-        ("Raport kapitana", lambda: embeds.captain_report_embed([("📅 Najbliższe mecze", f"{embeds._ts(base, 'F')} · vs **Przykładowa Drużyna**"), ("🏆 Tabela", "🏅 **5.** miejsce · **21** pkt · ▲2 vs poprzedni raport")], ["Nie ustawiono składu na mecz z Przykładową Drużyną (`/sklad`)."])),
         ("LIVE", lambda: embeds.live_embed(live)),
         ("Start meczu", lambda: embeds.match_started_embed(base)),
         ("Wynik: wygrana", lambda: embeds.result_embed(win, form="WWLWW", standing=standing)),
@@ -2312,7 +1992,6 @@ async def cmd_sklad(
     players = [p for p in (gracz1, gracz2, gracz3, gracz4, gracz5, gracz6, gracz7) if p is not None]
     ids = list(dict.fromkeys(p.id for p in players))
     db.set_config(f"lineup_{mid}", json.dumps(ids))
-    _index_add("lineup_index", mid)
 
     # Reset potwierdzeń przy nowym składzie
     if ids:
@@ -2452,114 +2131,6 @@ async def cmd_gif_usun(interaction: discord.Interaction, numer: app_commands.Ran
     await interaction.response.send_message(f"Usunięto #{numer}: {removed[:80]}\nPozostało: {len(gifs)}.", ephemeral=True)
 
 
-@bot.tree.command(name="gracz", description="Karta gracza: nick, dostępność w ankietach, występy w składzie")
-@app_commands.describe(osoba="Osoba z serwera")
-async def cmd_gracz(interaction: discord.Interaction, osoba: discord.Member):
-    nick = _player_nicks().get(osoba.id)
-    await interaction.response.send_message(
-        embed=embeds.player_card_embed(osoba.display_name, nick, bot._player_stats(osoba.id), osoba.display_avatar.url)
-    )
-
-
-@bot.tree.command(name="kapitan", description="Ustaw kapitana: odbiorcę raportu i alertów w DM (bez argumentów czyści; właściciel)")
-@app_commands.describe(osoba="Kapitan drużyny")
-async def cmd_kapitan(interaction: discord.Interaction, osoba: Optional[discord.Member] = None):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
-        return
-    none = discord.AllowedMentions.none()
-    if osoba is None:
-        db.set_config("captain_id", None)
-        await interaction.response.send_message("Kapitan wyczyszczony. Raporty i alerty trafią do właściciela aplikacji bota.", ephemeral=True)
-        return
-    db.set_config("captain_id", str(osoba.id))
-    await interaction.response.send_message(
-        f"👑 Kapitan: {osoba.mention}. Poniedziałkowy raport i alerty o opóźnieniu meczu trafią do niego w wiadomości prywatnej.",
-        ephemeral=True, allowed_mentions=none,
-    )
-
-
-@bot.tree.command(name="raport", description="Pokaż raport kapitana teraz (właściciel)")
-async def cmd_raport(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    await interaction.followup.send(embed=await bot._build_report(), ephemeral=True)
-
-
-@bot.tree.command(name="zaplanuj", description="Zaplanuj wiadomość na wybrany dzień i godzinę (właściciel)")
-@app_commands.describe(
-    data="Data: DD.MM lub DD.MM.RRRR", godzina="Godzina HH:MM (czas polski)", kanal="Kanał docelowy",
-    tresc="Treść wiadomości (max 1800 znaków)", rola="Opcjonalnie: rola do oznaczenia",
-)
-async def cmd_zaplanuj(
-    interaction: discord.Interaction, data: str, godzina: str, kanal: discord.TextChannel,
-    tresc: str, rola: Optional[discord.Role] = None,
-):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
-        return
-    dt = _parse_when(data, godzina)
-    if dt is None:
-        await interaction.response.send_message("Nie rozumiem daty lub godziny. Użyj np. `20.10` lub `20.10.2026` oraz `18:30`.", ephemeral=True)
-        return
-    if dt <= datetime.now(TZ) + timedelta(minutes=1):
-        await interaction.response.send_message("Ten termin już minął. Podaj datę z przyszłości.", ephemeral=True)
-        return
-    tresc = tresc.strip()
-    if not tresc or len(tresc) > 1800:
-        await interaction.response.send_message("Treść musi mieć od 1 do 1800 znaków.", ephemeral=True)
-        return
-    items = _sched_list()
-    if len(items) >= 25:
-        await interaction.response.send_message("Limit 25 zaplanowanych wiadomości. Usuń coś przez `/zaplanuj-usun`.", ephemeral=True)
-        return
-    me = interaction.guild.me if interaction.guild else None
-    if me and not kanal.permissions_for(me).send_messages:
-        await interaction.response.send_message(f"Bot nie ma uprawnienia do pisania na {kanal.mention}.", ephemeral=True)
-        return
-    seq = (db.get_config_int("sched_seq") or 0) + 1
-    db.set_config("sched_seq", str(seq))
-    items.append({"id": seq, "ts": int(dt.timestamp()), "ch": kanal.id, "text": tresc, "role": rola.id if rola else None, "by": interaction.user.id})
-    db.set_config("sched_msgs", json.dumps(items))
-    await interaction.response.send_message(
-        f"⏰ Zaplanowano #{seq} na <t:{int(dt.timestamp())}:F> (<t:{int(dt.timestamp())}:R>) w {kanal.mention}.",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="zaplanowane", description="Lista zaplanowanych wiadomości (właściciel)")
-async def cmd_zaplanowane(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
-        return
-    items = sorted(_sched_list(), key=lambda i: i.get("ts", 0))
-    emb = embeds._base("⏰ Zaplanowane wiadomości", embeds.C_INFO)
-    if items:
-        emb.description = "\n".join(
-            f"**#{i['id']}** · <t:{i['ts']}:F> · <#{i['ch']}>\n> {i['text'][:80]}" for i in items
-        )[:4000]
-    else:
-        emb.description = "Brak zaplanowanych wiadomości. Dodaj je komendą `/zaplanuj`."
-    await interaction.response.send_message(embed=emb, ephemeral=True)
-
-
-@bot.tree.command(name="zaplanuj-usun", description="Usuń zaplanowaną wiadomość po numerze (właściciel)")
-@app_commands.describe(numer="Numer z listy `/zaplanowane`")
-async def cmd_zaplanuj_usun(interaction: discord.Interaction, numer: int):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
-        return
-    items = _sched_list()
-    left = [i for i in items if i.get("id") != numer]
-    if len(left) == len(items):
-        await interaction.response.send_message(f"Nie ma zaplanowanej wiadomości o numerze {numer}.", ephemeral=True)
-        return
-    db.set_config("sched_msgs", json.dumps(left))
-    await interaction.response.send_message(f"Usunięto zaplanowaną wiadomość #{numer}.", ephemeral=True)
-
-
 @bot.event
 async def on_ready():
     print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
@@ -2568,7 +2139,16 @@ async def on_ready():
         embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
     except Exception:
         pass
-    print("Bot gotowy – taski i komendy według harmonogramu soft-startu.")
+    print("Bot gotowy – komendy zsynchronizowane, taski według soft-startu.")
+    try:
+        for guild in bot.guilds:
+            try:
+                synced = await bot.tree.sync(guild=guild)
+                print(f"[sync] {guild.name}: {len(synced)} komend")
+            except Exception as e:
+                print(f"[sync] guild {guild.id}: {e}")
+    except Exception as e:
+        print(f"[sync] on_ready: {e}")
     if bot._announced:
         return
     bot._announced = True
