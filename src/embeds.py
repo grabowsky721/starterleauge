@@ -252,6 +252,7 @@ def result_embed(
     match: dict,
     form: str | None = None,
     standing: dict | None = None,
+    correction: str | None = None,
 ) -> discord.Embed:
     t1 = _team_name(match, "team1")
     t2 = _team_name(match, "team2")
@@ -277,6 +278,8 @@ def result_embed(
         if pool:
             seed = str(match.get("id") or match.get("matchDate") or "")
             desc += f"\n*{random.Random(seed).choice(pool)}*"
+    if correction:
+        desc += f"\n✏️ Korekta wyniku: było **{correction}**, jest **{_score_str(match)}**"
     embed = _base(title, color, desc)
     embed.add_field(name="📅 Data", value=match.get("matchDate") or "-", inline=True)
     embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
@@ -505,6 +508,79 @@ def lineup_embed(match: dict, ids: list[int], nicks: dict[int, str] | None = Non
     return embed
 
 
+def new_match_embed(match: dict, dated: bool = False) -> discord.Embed:
+    has_date = bool(match.get("matchDate") and match.get("matchTime"))
+    title = "📅 Ustalono termin meczu" if dated else "🆕 Nowy mecz w terminarzu"
+    embed = _base(title, C_UPCOMING, f"## PINDOLZ  ⚔️  {_opponent(match)}")
+    embed.add_field(
+        name="🕒 Termin",
+        value=f"{_ts(match, 'F')}\n{_ts(match, 'R')}" if has_date else "do ustalenia",
+        inline=True,
+    )
+    embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
+    embed.add_field(name="🎯 Format", value=f"Bo{match.get('bestOf') or '?'}", inline=True)
+    _add_links(embed)
+    return embed
+
+
+def delay_embed(match: dict, late_min: int) -> discord.Embed:
+    embed = _base(
+        "⏳ Mecz jeszcze się nie rozpoczął?",
+        C_LOSS,
+        f"## PINDOLZ  ⚔️  {_opponent(match)}\nPlanowy start był {_ts(match, 'R')} ({_ts(match, 't')}), a LIVE nadal nie widać.",
+    )
+    embed.add_field(name="⏱️ Spóźnienie", value=f"ok. **{late_min} min**", inline=True)
+    embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
+    embed.add_field(
+        name="Co sprawdzić",
+        value="Czy mecz nie został opóźniony lub przełożony i czy rywal jest gotowy.",
+        inline=False,
+    )
+    _add_links(embed)
+    return embed
+
+
+def player_card_embed(name: str, nick: str | None, stats: dict, avatar_url: str | None = None) -> discord.Embed:
+    embed = _base(
+        f"🎮 {name}",
+        C_TEAM,
+        f"Nick w lidze: `{nick}`" if nick else "Brak powiązanego nicku (właściciel: `/polacz`).",
+    )
+    polls = stats.get("polls", 0)
+    yes, no, maybe = stats.get("yes", 0), stats.get("no", 0), stats.get("maybe", 0)
+    if polls:
+        embed.add_field(name="📊 Dostępność", value=f"**{round(yes / polls * 100)}%** ({yes} z {polls} ankiet)", inline=True)
+        embed.add_field(
+            name="🗳️ Głosy",
+            value=f"✅ {yes} · ❌ {no} · ❔ {maybe}\nbez głosu: {max(polls - yes - no - maybe, 0)}",
+            inline=True,
+        )
+    else:
+        embed.add_field(name="🗳️ Ankiety", value="Brak zamkniętych ankiet w danych.", inline=False)
+    lineups = stats.get("lineups", 0)
+    embed.add_field(
+        name="👥 Skład",
+        value=f"**{stats.get('in_lineup', 0)}** z {lineups} ustawionych składów" if lineups else "Brak ustawionych składów",
+        inline=True,
+    )
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+    embed.set_footer(text=f"{FOOTER} • dane od włączenia śledzenia ankiet")
+    return embed
+
+
+def captain_report_embed(sections: list[tuple[str, str]], warnings: list[str]) -> discord.Embed:
+    embed = _base("📋 Raport kapitana", C_TEAM, "Podsumowanie tygodnia i rzeczy do załatwienia.")
+    for name, value in sections:
+        embed.add_field(name=name, value=(value or "—")[:1024], inline=False)
+    embed.add_field(
+        name="⚠️ Do zrobienia" if warnings else "✅ Do zrobienia",
+        value=("\n".join(f"• {w}" for w in warnings) if warnings else "Nic pilnego.")[:1024],
+        inline=False,
+    )
+    return embed
+
+
 def help_embed() -> discord.Embed:
     embed = _base("📖 Komendy PINDOLZ bota", C_INFO)
     embed.add_field(
@@ -516,6 +592,7 @@ def help_embed() -> discord.Embed:
             "`/live` · czy gra teraz\n"
             "`/tabela` · tabela dywizji\n"
             "`/gracze` · powiązani gracze\n"
+            "`/gracz` · karta gracza (ankiety, skład)\n"
             "`/wersja` · wersja bota\n"
             "`/status` · API i kanały\n"
             "`/pomoc` · ta lista"
@@ -535,6 +612,9 @@ def help_embed() -> discord.Embed:
             "`/pokaz-embedy` · podgląd wszystkich kart\n"
             "`/sklad` · skład na najbliższy mecz\n"
             "`/polacz` · powiąż osobę z nickiem gracza\n"
+            "`/kapitan` · odbiorca raportu i alertów w DM\n"
+            "`/raport` · raport kapitana teraz\n"
+            "`/zaplanuj` · wiadomość na później (też `/zaplanowane`, `/zaplanuj-usun`)\n"
             "`/gif-dodaj` · GIF-y po wygranej (też `/gif-lista`, `/gif-usun`)"
         ),
         inline=False,
@@ -557,7 +637,11 @@ def help_embed() -> discord.Embed:
             "🔔 przycisk „Przypomnij mi” pod kartą meczu (DM)\n"
             "🧵 wątek z relacją LIVE\n"
             "📈 awans lub spadek w tabeli\n"
-            "🚨 alert o awarii API (DM do właściciela)"
+            "🚨 alert o awarii API (DM do właściciela)\n"
+            "🆕 ogłoszenie nowego meczu lub terminu\n"
+            "⏳ alert, gdy mecz nie ruszył 15 min po planie (DM)\n"
+            "📋 raport kapitana w poniedziałek 9:00 (DM)\n"
+            "✏️ korekta wyniku na karcie"
         ),
         inline=False,
     )
