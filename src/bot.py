@@ -92,6 +92,10 @@ COMMAND_START_ORDER = [
     "gif-dodaj",
     "gif-lista",
     "gif-usun",
+    "panel",
+    "sklad-status",
+    "ping-sklad",
+    "moj-status",
 ]
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
@@ -354,6 +358,52 @@ def sklad_confirm_view(mid: int) -> discord.ui.View:
     view.add_item(SkladConfirmButton(mid, "yes"))
     view.add_item(SkladConfirmButton(mid, "no"))
     return view
+
+
+def _match_opponent(m: dict) -> str:
+    try:
+        t1, t2 = m.get("team1") or {}, m.get("team2") or {}
+        n1, n2 = t1.get("name") or "?", t2.get("name") or "?"
+        return n2 if "pindolz" in n1.lower() else n1
+    except Exception:
+        return "?"
+
+
+def _lineup_status_lists(mid: int) -> tuple[list[int], list[str], list[str], list[str]]:
+    """Zwraca (roster_ids, yes_mentions, no_mentions, pending_mentions)."""
+    try:
+        roster = [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
+    except Exception:
+        roster = []
+    data = _lineup_confirms(mid)
+    yes, no, pending = [], [], []
+    for pid in roster:
+        st = data.get(str(pid))
+        mention = f"<@{pid}>"
+        if st == "yes":
+            yes.append(mention)
+        elif st == "no":
+            no.append(mention)
+        else:
+            pending.append(mention)
+    return roster, yes, no, pending
+
+
+def _lineup_status_embed(m: dict, mid: int) -> discord.Embed:
+    roster, yes, no, pending = _lineup_status_lists(mid)
+    opp = _match_opponent(m)
+    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    emb = discord.Embed(
+        title="📋 Status składu",
+        description=f"**vs {opp}** · {when}\nMecz `#{mid}`",
+        color=0x5865F2,
+    )
+    emb.add_field(name=f"✅ Gram ({len(yes)})", value=", ".join(yes) or "—", inline=False)
+    emb.add_field(name=f"❌ Nie mogą ({len(no)})", value=", ".join(no) or "—", inline=False)
+    emb.add_field(name=f"⏳ Brak odpowiedzi ({len(pending)})", value=", ".join(pending) or "—", inline=False)
+    emb.set_footer(text=f"W składzie: {len(roster)} osób")
+    return emb
+
 
 
 
@@ -690,7 +740,20 @@ class PindolzBot(commands.Bot):
 
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
-        return bool(interaction.guild and interaction.user.id == interaction.guild.owner_id)
+        uid = interaction.user.id
+        if interaction.guild:
+            return uid == interaction.guild.owner_id
+        # DM: właściciel dowolnego wspólnego serwera
+        for g in self.guilds:
+            if g.owner_id == uid:
+                return True
+        return False
+
+    def _owner_guild(self, user_id: int) -> discord.Guild | None:
+        for g in self.guilds:
+            if g.owner_id == user_id:
+                return g
+        return None
 
     async def get_channel_safe(self, channel_id: int | None):
         if not channel_id:
@@ -1735,6 +1798,34 @@ async def cmd_tabela(interaction: discord.Interaction):
 
 @bot.tree.command(name="pomoc", description="Lista komend i automatów bota")
 async def cmd_pomoc(interaction: discord.Interaction):
+    if interaction.guild is None:
+        emb = discord.Embed(
+            title="📬 Komendy w DM",
+            description="Te komendy działają w prywatnej rozmowie z botem:",
+            color=0x5865F2,
+        )
+        emb.add_field(
+            name="Dla kapitana / właściciela",
+            value=(
+                "`/panel` – najbliższy mecz, skład, API\n"
+                "`/sklad-status` – kto Gram / Nie może / cisza\n"
+                "`/ping-sklad` – ponów DM do osób bez odpowiedzi"
+            ),
+            inline=False,
+        )
+        emb.add_field(
+            name="Dla graczy",
+            value="`/moj-status` – czy jesteś w składzie i co odpisałeś",
+            inline=False,
+        )
+        emb.add_field(
+            name="Inne",
+            value="`/pomoc` · `/wersja` · `/nastepny` (jeśli dostępne na serwerze też działają tu)",
+            inline=False,
+        )
+        emb.set_footer(text="Wymagany wspólny serwer z botem · DM od bota tylko jeśli możesz otrzymywać PW")
+        await interaction.response.send_message(embed=emb)
+        return
     await interaction.response.send_message(embed=embeds.help_embed(), ephemeral=True)
 
 
@@ -2129,6 +2220,175 @@ async def cmd_gif_usun(interaction: discord.Interaction, numer: app_commands.Ran
     db.set_config("win_gifs", json.dumps(gifs))
     db.set_config("win_gif_last", None)
     await interaction.response.send_message(f"Usunięto #{numer}: {removed[:80]}\nPozostało: {len(gifs)}.", ephemeral=True)
+
+
+
+@bot.tree.command(name="panel", description="DM: panel kapitana – mecz, skład, API")
+async def cmd_panel(interaction: discord.Interaction):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=interaction.guild is not None)
+    # API
+    api_ok, api_msg = True, "OK"
+    try:
+        await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception as e:
+        api_ok, api_msg = False, str(e)[:120]
+    try:
+        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception:
+        upcoming = []
+    nxt = bot._next_match(upcoming) if upcoming else None
+    emb = discord.Embed(title="📌 Panel kapitana", color=0x5865F2 if api_ok else 0xED4245)
+    emb.add_field(name="API", value=("✅ " + api_msg) if api_ok else ("❌ " + api_msg), inline=False)
+    main_ch = bot._main_channel_id()
+    live_ch = bot._live_channel_id()
+    table_ch = bot._table_channel_id()
+    emb.add_field(
+        name="Kanały",
+        value=(
+            f"Główny: {f'<#{main_ch}>' if main_ch else '—'}\n"
+            f"LIVE: {f'<#{live_ch}>' if live_ch else '—'}\n"
+            f"Tabela: {f'<#{table_ch}>' if table_ch else '—'}"
+        ),
+        inline=False,
+    )
+    if not nxt:
+        emb.add_field(name="Najbliższy mecz", value="Brak w terminarzu", inline=False)
+    else:
+        _, m = nxt
+        mid = int(m["id"])
+        opp = _match_opponent(m)
+        when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+        roster, yes, no, pending = _lineup_status_lists(mid)
+        emb.add_field(
+            name="Najbliższy mecz",
+            value=f"**vs {opp}** · {when}\nSkład: {len(roster)} · ✅{len(yes)} · ❌{len(no)} · ⏳{len(pending)}",
+            inline=False,
+        )
+        emb.add_field(name="✅ Gram", value=", ".join(yes) or "—", inline=False)
+        emb.add_field(name="⏳ Bez odpowiedzi", value=", ".join(pending) or "—", inline=False)
+    emb.set_footer(text=f"Wersja {BOT_VERSION}")
+    await interaction.followup.send(embed=emb)
+
+
+@bot.tree.command(name="sklad-status", description="DM: status potwierdzeń składu")
+async def cmd_sklad_status(interaction: discord.Interaction):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=interaction.guild is not None)
+    try:
+        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception as e:
+        await interaction.followup.send(f"Błąd API: {e}")
+        return
+    nxt = bot._next_match(upcoming)
+    if not nxt:
+        await interaction.followup.send("Brak nadchodzącego meczu.")
+        return
+    _, m = nxt
+    mid = int(m["id"])
+    await interaction.followup.send(embed=_lineup_status_embed(m, mid))
+
+
+@bot.tree.command(name="ping-sklad", description="DM: ponów prośbę o potwierdzenie do osób bez odpowiedzi")
+async def cmd_ping_sklad(interaction: discord.Interaction):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=interaction.guild is not None)
+    try:
+        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception as e:
+        await interaction.followup.send(f"Błąd API: {e}")
+        return
+    nxt = bot._next_match(upcoming)
+    if not nxt:
+        await interaction.followup.send("Brak nadchodzącego meczu.")
+        return
+    _, m = nxt
+    mid = int(m["id"])
+    roster, yes, no, pending = _lineup_status_lists(mid)
+    if not pending:
+        await interaction.followup.send("Wszyscy z składu już odpowiedzieli.")
+        return
+    # pending mentions -> ids
+    data = _lineup_confirms(mid)
+    pending_ids = [pid for pid in roster if data.get(str(pid)) not in ("yes", "no")]
+    opp = _match_opponent(m)
+    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    ok, fail = [], []
+    for pid in pending_ids:
+        user = bot.get_user(pid)
+        if user is None:
+            try:
+                user = await bot.fetch_user(pid)
+            except Exception:
+                fail.append(f"<@{pid}>")
+                continue
+        try:
+            emb = discord.Embed(
+                title="🔔 Przypomnienie: potwierdź skład PINDOLZ",
+                description=(
+                    f"Nadal czekamy na Twoją odpowiedź.\n"
+                    f"**Rywal:** {opp}\n"
+                    f"**Termin:** {when}\n\n"
+                    f"Czy możesz grać?"
+                ),
+                color=0xFEE75C,
+            )
+            emb.set_footer(text=f"Mecz #{mid}")
+            await user.send(embed=emb, view=sklad_confirm_view(mid))
+            ok.append(f"<@{pid}>")
+        except Exception:
+            fail.append(f"<@{pid}>")
+    lines = [f"Wysłano ponownie do **{len(ok)}**: {', '.join(ok) or '—'}"]
+    if fail:
+        lines.append(f"Nie udało się (PW?): {', '.join(fail)}")
+    await interaction.followup.send("\n".join(lines))
+
+
+@bot.tree.command(name="moj-status", description="DM: czy jesteś w składzie i co odpisałeś")
+async def cmd_moj_status(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=interaction.guild is not None)
+    try:
+        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception as e:
+        await interaction.followup.send(f"Błąd API: {e}")
+        return
+    nxt = bot._next_match(upcoming)
+    if not nxt:
+        await interaction.followup.send("Brak nadchodzącego meczu PINDOLZ.")
+        return
+    _, m = nxt
+    mid = int(m["id"])
+    try:
+        roster = [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
+    except Exception:
+        roster = []
+    uid = interaction.user.id
+    opp = _match_opponent(m)
+    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    if uid not in roster:
+        await interaction.followup.send(
+            f"Nie jesteś w składzie na najbliższy mecz (**vs {opp}**, {when})."
+        )
+        return
+    st = _lineup_confirms(mid).get(str(uid))
+    if st == "yes":
+        ans = "✅ **Gram**"
+    elif st == "no":
+        ans = "❌ **Nie mogę**"
+    else:
+        ans = "⏳ **Brak odpowiedzi** – sprawdź DM od bota lub poczekaj na ponowienie od kapitana"
+    await interaction.followup.send(
+        f"Mecz **vs {opp}** · {when}\n"
+        f"Jesteś w składzie.\n"
+        f"Twoja odpowiedź: {ans}"
+    )
+
 
 
 @bot.event
