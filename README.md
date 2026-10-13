@@ -1,4 +1,4 @@
-> **Wersja bota: `1.4.7`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.4.8`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -20,7 +20,7 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 - **Komendy w DM** – panel kapitana, status składu, ponowienie DM, status gracza
 - GIF po wygranej, powiązania nicków (`/polacz`), ankiety, wydarzenia Discord
 - Soft-start tasków + wiadomość startowa z postępem ładowania
-- Sync slash-komend **od razu przy starcie** (global + serwer)
+- Sync slash-komend **60 s po starcie** (global + serwer)
 - Cache API, SQLite po restarcie, przełączniki w `/ustawienia`
 
 ---
@@ -83,7 +83,8 @@ Bot może pisać pierwszy DM tylko do osób, które mogą otrzymywać PW (np. po
 
 | Czas | Co |
 |------|-----|
-| **0 s** | Login, SQLite, widoki, **sync komend** |
+| **0 s** | Login, SQLite, widoki |
+| **60 s** | **Sync komend** (slash) |
 | **20 s** | LIVE |
 | **35 s** | Prematch |
 | **45 s** | Tabela |
@@ -127,7 +128,7 @@ Wiadomość startowa pokazuje ✅ / 🔄 / ⏳ i znika po 10 min.
 
 **Sekrety:** `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
 
-Po starcie w logu: `[sync] global: … komend` oraz `[sync] NazwaSerwera: …`.
+Po starcie w logu: `[sync] komendy za 60s…`, potem `[sync] global: …` / `[sync] NazwaSerwera: …`.
 
 Na Discordzie (właściciel):
 
