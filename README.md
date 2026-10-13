@@ -1,4 +1,4 @@
-> **Wersja bota: `1.5.0`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.5.4`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -12,13 +12,14 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 - Terminarz i wyniki – **edycja** wiadomości zamiast spamu
 - **LIVE** co **5 s** podczas meczu / **10 s** gdy nie gra
-- Soft-start w 4 fazach + wiadomość startowa (✅ / 🔄 / ⏳)
-- Komendy slash: od **60 s** po starcie, w UI **1 po drugiej** (co 2 s), potem pełny sync
-- **`/sklad`** – skład + DM Gram/Nie mogę + raport do kapitana
+- Soft-start (4 fazy) + wiadomość startowa z postępem
+- Komendy slash od **60 s** (UI 1 po drugiej, potem sync)
+- **Panele z interfejsem** (selecty, przyciski, modale)
+- **`/sklad`** – panel składu, **wiele nazwanych składów**, zapis na mecz, DM Gram/Nie mogę
 - Komendy w **DM**: `/panel`, `/sklad-status`, `/ping-sklad`, `/moj-status`, `/pomoc`
-- Tabela dywizji, prematch 30 min / 1 h, ankiety, GIF po wygranej, `/polacz`
-- Nowa wersja z GitHuba sprawdzana **co 1 h**
-- Cache API, SQLite, `/ustawienia`
+- Tabela, prematch, ankiety, GIF, powiązania nicków
+- Update wersji z GitHuba **co 1 h**
+- SQLite, cache API, `/ustawienia`
 
 ---
 
@@ -28,62 +29,48 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 | Komenda | Opis |
 |---------|------|
-| `/pindolz` | Najbliższe + ostatnie mecze |
-| `/live` | Czy gra teraz |
-| `/wyniki` | Ostatnie wyniki |
-| `/nadchodzace` | Przyszłe mecze |
-| `/tabela` | Tabela dywizji |
-| `/status` | API, kanały, uptime |
-| `/wersja` | Wersja bota |
-| `/pomoc` | Lista komend (inna treść w DM) |
-| `/gracze` | Powiązania Discord ↔ nick |
-| `/moj-status` | Czy jesteś w składzie i co odpisałeś |
+| `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` | Mecze i tabela |
+| `/status` `/wersja` `/pomoc` `/gracze` | Info |
+| `/moj-status` | Status w składzie (też DM) |
 
-### Właściciel serwera
+### Właściciel (część z UI)
 
-| Komenda | Opis |
-|---------|------|
-| `/setup` | Kanał główny |
-| `/setup-live` | Kanał LIVE |
-| `/setup-tabela` | Kanał tabeli |
-| `/setup-ankiety` | Kanał ankiet |
-| `/setup-all` | Wszystkie kanały |
-| `/ankieta-role` | Role do ankiet |
-| `/ustawienia` | Włącz / wyłącz funkcje |
-| `/pokaz-embedy` | Podgląd kart |
-| `/sklad` | Skład + DM potwierdzeń |
-| `/polacz` | Nick w lidze |
-| `/gif-dodaj` `/gif-lista` `/gif-usun` | GIF po wygranej |
-| `/panel` | Panel kapitana (też DM) |
-| `/sklad-status` | Status potwierdzeń składu |
-| `/ping-sklad` | Ponów DM bez odpowiedzi |
+| Komenda | Interfejs |
+|---------|-----------|
+| `/sklad` | Select graczy, zapis na mecz, **Zapisz jako…** (wiele składów), DM |
+| `/setup-all` | Wybór 3 kanałów + Zapisz |
+| `/polacz` | Osoba + modal nicku |
+| `/ankieta-role` | Select ról |
+| `/gif-lista` | Lista + usuwanie |
+| `/panel` | Odśwież / status składu / ping |
+| `/ustawienia` | Przyciski funkcji |
+| `/setup` `/setup-live` `/setup-tabela` `/setup-ankiety` | Pojedyncze kanały |
+| `/gif-dodaj` `/gif-usun` `/pokaz-embedy` | Pozostałe |
+| `/sklad-status` `/ping-sklad` | Skład (też DM) |
 
 ---
 
-## Soft-start (od `ready`)
+## Skład – wiele zapisów
+
+1. `/sklad` → wybierz graczy  
+2. **Zapisz jako…** → nazwa (np. Główny, Rezerwa)  
+3. Lista rozwijana → wczytaj skład  
+4. **Zapisz na mecz** / **Zapisz + DM** → na najbliższy mecz  
+
+Presety są w SQLite i przeżywają restart.
+
+---
+
+## Soft-start
 
 | Czas | Co |
 |------|-----|
-| **15 s** | LIVE |
-| **30 s** | Prematch |
-| **45 s** | Daily |
-| **60 s** | Komendy 1 po drugiej (UI) + **sync** |
-| **~75 s+** | Tabela → Status → Ankiety → API → Eventy |
-| **~150 s+** | Cleanup → Update GitHub → Weekly |
-
----
-
-## Harmonogram (Europe/Warsaw)
-
-| Co | Kiedy |
-|----|-------|
-| LIVE | 5 s (mecz) / 10 s (brak) |
-| Prematch | co 1 min |
-| Daily | co 10 min |
-| Tabela | 08:00, 18:00, 20:00, 21:30, 23:00 |
-| Weekly | niedziela 20:00 |
-| Cleanup | 04:00 |
-| Update GitHub | **co 1 h** |
+| 15 s | LIVE |
+| 30 s | Prematch |
+| 45 s | Daily |
+| 60 s | Komendy (UI) + sync |
+| ~75 s+ | Tabela, status, ankiety, API, eventy |
+| ~150 s+ | Cleanup, update, weekly |
 
 ---
 
@@ -91,15 +78,13 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 | Pole | Wartość |
 |------|---------|
-| Git Repo Address | `https://github.com/grabowsky721/starterleauge` |
-| Git Branch | `main` |
+| Git Repo | `https://github.com/grabowsky721/starterleauge` |
+| Branch | `main` |
 | Auto Update | `1` |
-| Bot py file | **`src/bot.py`** |
-| Requirements file | `requirements.txt` |
+| Bot py file | `src/bot.py` |
+| Requirements | `requirements.txt` |
 
-**Sekrety:** `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
-
-Po starcie w logu: `[start] komenda /…`, potem `[sync] global: … komend`.
+Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
 
 ---
 
