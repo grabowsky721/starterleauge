@@ -101,6 +101,7 @@ COMMAND_START_ORDER = [
     "kapitan",
     "vicekapitan",
     "sztab",
+    "trening",
 ]
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
@@ -314,6 +315,155 @@ class PollButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_p
 
     async def callback(self, interaction: discord.Interaction):
         await bot.handle_poll_vote(interaction, self.mid, self.vote)
+
+
+
+# ---------- Ankieta treningu ----------
+def _training_key(pid: int) -> str:
+    return f"training_poll_{pid}"
+
+
+def _load_training(pid: int) -> dict | None:
+    try:
+        raw = db.get_config(_training_key(pid))
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _save_training(pid: int, data: dict) -> None:
+    db.set_config(_training_key(pid), json.dumps(data, ensure_ascii=False))
+
+
+def _next_training_id() -> int:
+    n = int(db.get_config("training_poll_seq") or "1")
+    db.set_config("training_poll_seq", str(n + 1))
+    return n
+
+
+def training_embed(data: dict, closed: bool = False) -> discord.Embed:
+    opts = data.get("options") or []
+    votes = data.get("votes") or {}
+    closes = data.get("closes_at")
+    when = f"<t:{closes}:R>" if closes else "—"
+    emb = discord.Embed(
+        title="🏋️ Ankieta treningu" + (" · zamknięta" if closed else ""),
+        description=(data.get("question") or "Kiedy możecie na trening?") + f"\n\nZamykam {when}",
+        color=0x95A5A6 if closed else 0x5865F2,
+    )
+    counts = [0] * len(opts)
+    by_opt: list[list[str]] = [[] for _ in opts]
+    for uid, oi in votes.items():
+        try:
+            oi = int(oi)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= oi < len(opts):
+            counts[oi] += 1
+            by_opt[oi].append(f"<@{uid}>")
+    for i, opt in enumerate(opts):
+        people = ", ".join(by_opt[i][:12]) if by_opt[i] else "_brak_"
+        more = f" +{len(by_opt[i])-12}" if len(by_opt[i]) > 12 else ""
+        emb.add_field(name=f"{i+1}. {opt} ({counts[i]})", value=people + more, inline=False)
+    emb.set_footer(text=f"ID {data.get('id')} · głosuj przyciskiem")
+    return emb
+
+
+def training_view(pid: int, options: list[str] | int) -> discord.ui.View:
+    if isinstance(options, int):
+        labels = [f"Opcja {i+1}" for i in range(options)]
+    else:
+        labels = list(options)
+    view = discord.ui.View(timeout=None)
+    for i, lab in enumerate(labels):
+        view.add_item(TreningButton(pid, i, label=str(lab)[:80]))
+    return view
+
+
+class TreningButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_train:(?P<pid>\d+):(?P<opt>\d+)"):
+    def __init__(self, pid: int, opt: int, label: str | None = None):
+        super().__init__(
+            discord.ui.Button(
+                label=(label or f"Opcja {opt + 1}")[:80],
+                style=discord.ButtonStyle.primary,
+                custom_id=f"pindolz_train:{pid}:{opt}",
+            )
+        )
+        self.pid = pid
+        self.opt = opt
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["pid"]), int(match["opt"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        data = _load_training(self.pid)
+        if not data or data.get("closed"):
+            await interaction.response.send_message("Ta ankieta jest już zamknięta.", ephemeral=True)
+            return
+        closes = data.get("closes_at") or 0
+        if closes and int(datetime.now(TZ).timestamp()) >= int(closes):
+            data["closed"] = True
+            _save_training(self.pid, data)
+            await interaction.response.send_message("Ankieta właśnie się zamknęła.", ephemeral=True)
+            return
+        opts = data.get("options") or []
+        if self.opt < 0 or self.opt >= len(opts):
+            await interaction.response.send_message("Nieprawidłowa opcja.", ephemeral=True)
+            return
+        votes = data.setdefault("votes", {})
+        votes[str(interaction.user.id)] = self.opt
+        data["votes"] = votes
+        _save_training(self.pid, data)
+        emb = training_embed(data, closed=False)
+        try:
+            await interaction.response.edit_message(embed=emb, view=training_view(self.pid, opts))
+        except Exception:
+            await interaction.response.send_message(f"Zapisano głos: **{opts[self.opt]}**", ephemeral=True)
+
+
+async def _close_training_poll(pid: int):
+    data = _load_training(pid)
+    if not data or data.get("closed"):
+        return
+    data["closed"] = True
+    _save_training(pid, data)
+    ch_id, msg_id = data.get("channel_id"), data.get("message_id")
+    if not ch_id or not msg_id:
+        return
+    try:
+        ch = await bot.get_channel_safe(int(ch_id))
+        if not ch:
+            return
+        msg = await ch.fetch_message(int(msg_id))
+        await msg.edit(embed=training_embed(data, closed=True), view=None)
+        opts = data.get("options") or []
+        votes = data.get("votes") or {}
+        counts = [0] * len(opts)
+        for oi in votes.values():
+            try:
+                oi = int(oi)
+                if 0 <= oi < len(opts):
+                    counts[oi] += 1
+            except (TypeError, ValueError):
+                pass
+        if counts and any(counts):
+            best = max(range(len(opts)), key=lambda i: counts[i])
+            summary = f"**Wynik treningu:** {opts[best]} ({counts[best]} głosów)"
+        else:
+            summary = "**Wynik treningu:** brak głosów"
+        await ch.send(summary)
+    except Exception as e:
+        print(f"[trening] close {pid}: {e}")
+
+
+async def _schedule_training_close(pid: int, closes_at: int):
+    delay = max(5, int(closes_at) - int(datetime.now(TZ).timestamp()))
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return
+    await _close_training_poll(pid)
 
 
 def poll_view(mid: int) -> discord.ui.View:
@@ -1072,11 +1222,33 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         try:
-            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton)
+            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
         asyncio.create_task(self._soft_start_tasks())
+        asyncio.create_task(self._reschedule_training_polls())
 
+
+
+    async def _reschedule_training_polls(self):
+        """Po restarcie domknij lub wznow odliczanie ankiet treningu."""
+        await asyncio.sleep(20)
+        try:
+            # skan sekwencji wstecz – max 50 ostatnich
+            seq = int(db.get_config("training_poll_seq") or "1")
+            now = int(datetime.now(TZ).timestamp())
+            for pid in range(max(1, seq - 50), seq):
+                data = _load_training(pid)
+                if not data or data.get("closed"):
+                    continue
+                closes = int(data.get("closes_at") or 0)
+                if closes and closes <= now:
+                    await _close_training_poll(pid)
+                elif closes:
+                    asyncio.create_task(_schedule_training_close(pid, closes))
+                    print(f"[trening] wznowiono timer #{pid}")
+        except Exception as e:
+            print(f"[trening] reschedule: {e}")
 
     BOOT_LABELS = (
         ("live", "LIVE"),
@@ -2852,6 +3024,79 @@ async def cmd_sztab(interaction: discord.Interaction):
     )
     emb.set_footer(text="Kapitana ustawia właściciel: /kapitan · Vice: /vicekapitan")
     await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+
+@bot.tree.command(name="trening", description="Ankieta terminu treningu z auto-zamknięciem (sztab)")
+@app_commands.describe(
+    opcja1="Termin / opcja 1",
+    opcja2="Termin / opcja 2",
+    opcja3="Opcja 3 (opcjonalnie)",
+    opcja4="Opcja 4 (opcjonalnie)",
+    godziny="Po ilu godzinach zamknąć (1–72, domyślnie 24)",
+    pytanie="Treść ankiety (opcjonalnie)",
+)
+async def cmd_trening(
+    interaction: discord.Interaction,
+    opcja1: str,
+    opcja2: str,
+    opcja3: Optional[str] = None,
+    opcja4: Optional[str] = None,
+    godziny: app_commands.Range[int, 1, 72] = 24,
+    pytanie: Optional[str] = None,
+):
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
+        return
+    opts = [opcja1.strip(), opcja2.strip()]
+    if opcja3 and opcja3.strip():
+        opts.append(opcja3.strip())
+    if opcja4 and opcja4.strip():
+        opts.append(opcja4.strip())
+    opts = [o[:80] for o in opts if o]
+    if len(opts) < 2:
+        await interaction.response.send_message("Podaj co najmniej 2 opcje.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    ch_id = db.get_config_int("poll_channel_id") or db.get_config_int("main_channel_id")
+    channel = interaction.channel
+    if ch_id:
+        ch2 = await bot.get_channel_safe(ch_id)
+        if ch2:
+            channel = ch2
+    pid = _next_training_id()
+    closes_at = int(datetime.now(TZ).timestamp()) + int(godziny) * 3600
+    data = {
+        "id": pid,
+        "options": opts,
+        "votes": {},
+        "closes_at": closes_at,
+        "closed": False,
+        "question": (pytanie or "Kiedy możecie na trening?").strip()[:200],
+        "channel_id": channel.id if channel else None,
+        "created_by": interaction.user.id,
+    }
+    # role ping
+    content = None
+    try:
+        role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
+        if role_ids:
+            content = " ".join(f"<@&{r}>" for r in role_ids)
+    except Exception:
+        pass
+    emb = training_embed(data, closed=False)
+    msg = await channel.send(content=content, embed=emb, view=training_view(pid, opts))
+    data["message_id"] = msg.id
+    data["channel_id"] = channel.id
+    _save_training(pid, data)
+    asyncio.create_task(_schedule_training_close(pid, closes_at))
+    await interaction.followup.send(
+        f"✅ Ankieta treningu **#{pid}** na {channel.mention} · zamykam <t:{closes_at}:R> ({godziny} h)",
+        ephemeral=True,
+    )
 
 
 
