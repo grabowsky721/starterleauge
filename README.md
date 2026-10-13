@@ -1,4 +1,4 @@
-> **Wersja bota: `1.4.10`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.5.0`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -13,7 +13,7 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 - Terminarz i wyniki – **edycja** wiadomości zamiast spamu
 - **LIVE** co **5 s** podczas meczu / **10 s** gdy nie gra
 - Soft-start w 4 fazach (~3 min) + wiadomość startowa z postępem
-- Sync slash-komend **60 s** po starcie
+- Sync slash-komend **60 s** po starcie, komendy **1 po drugiej** (co 2 s) w UI
 - **`/sklad`** – skład + DM (Gram / Nie mogę) + raport do kapitana
 - Komendy w **DM**: `/panel`, `/sklad-status`, `/ping-sklad`, `/moj-status`, `/pomoc`
 - Tabela, prematch, ankiety, GIF, powiązania graczy
@@ -59,31 +59,11 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 | **15 s** | LIVE |
 | **30 s** | Prematch |
 | **45 s** | Daily |
-| **60 s** | **Sync komend** |
-| **75 s** | Tabela |
-| **90 s** | Status |
-| **105 s** | Ankiety |
-| **120 s** | API watch |
-| **135 s** | Eventy |
-| **150 s** | Cleanup |
-| **165 s** | Update GitHub (task start) |
-| **180 s** | Weekly – koniec |
+| **60 s** | Komendy 1 po drugiej (UI) + **sync** |
+| **75 s+** | Tabela → status → ankiety → API → eventy |
+| **150 s+** | Cleanup → Update → Weekly |
 
-Potem update wersji z GitHuba **co 1 godzinę**.
-
----
-
-## Harmonogram
-
-| Co | Kiedy |
-|----|-------|
-| LIVE | 5 s / 10 s |
-| Prematch | co 1 min |
-| Daily | co 10 min |
-| Tabela | 08:00, 18:00, 20:00, 21:30, 23:00 |
-| Weekly | niedziela 20:00 |
-| Cleanup | 04:00 |
-| Update GitHub | **co 1 h** |
+Update wersji z GitHuba **co 1 h**.
 
 ---
 
@@ -98,15 +78,5 @@ Potem update wersji z GitHuba **co 1 godzinę**.
 | Requirements | `requirements.txt` |
 
 Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
-
----
-
-## Zależności
-
-```
-discord.py>=2.3.2
-requests>=2.31.0
-python-dotenv>=1.0.0
-```
 
 Team ID: **869**. Wersja: zgodne `VERSION` + README + `/wersja`.
