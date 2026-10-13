@@ -54,19 +54,20 @@ TABLE_UPDATE_TIMES = [
 LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
 # Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
-START_DELAY_LIVE = 20
-START_DELAY_PREMATCH = 35
-START_DELAY_TABLE = 45
-START_DELAY_DAILY = 60
-START_DELAY_CLEANUP = 80
-START_DELAY_STATUS = 100
-START_DELAY_POLL = 120
-START_DELAY_API = 140
-START_DELAY_EVENT = 160
-START_DELAY_COMMANDS = 180
+# Soft-start: mecz → komendy@60s → tło → utrzymanie (~3 min)
+START_DELAY_LIVE = 15
+START_DELAY_PREMATCH = 30
+START_DELAY_DAILY = 45
+START_DELAY_COMMANDS = 60
+START_DELAY_TABLE = 75
+START_DELAY_STATUS = 90
+START_DELAY_POLL = 105
+START_DELAY_API = 120
+START_DELAY_EVENT = 135
+START_DELAY_CLEANUP = 150
+START_DELAY_UPDATE = 165
+START_DELAY_WEEKLY = 180
 START_DELAY_COMMANDS_SYNC = 60
-START_DELAY_UPDATE = 200
-START_DELAY_WEEKLY = 220
 
 # Kolejność startu komend slash (po jednej, co COMMAND_START_GAP s)
 COMMAND_START_GAP = 2
@@ -433,22 +434,20 @@ class PindolzBot(commands.Bot):
             self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
-        # Komendy slash – sync po START_DELAY_COMMANDS_SYNC sekundach od ready
         asyncio.create_task(self._soft_start_tasks())
-        asyncio.create_task(self._sync_commands_after_delay())
 
 
     BOOT_LABELS = (
         ("live", "LIVE"),
         ("prematch", "Przypomnienia"),
-        ("table", "Tabela"),
         ("daily", "Daily"),
-        ("cleanup", "Cleanup"),
+        ("commands", "Komendy slash"),
+        ("table", "Tabela"),
         ("status", "Status"),
         ("poll", "Ankiety"),
         ("api", "API watch"),
         ("event", "Eventy"),
-        ("commands", "Komendy slash"),
+        ("cleanup", "Cleanup"),
         ("update", "Update GitHub"),
         ("weekly", "Weekly"),
     )
@@ -490,290 +489,138 @@ class PindolzBot(commands.Bot):
 
 
     async def _soft_start_tasks(self):
+        """Mecz → komendy (60s) → tło → utrzymanie."""
         await self.wait_until_ready()
-        print("[start] soft-start według harmonogramu (~3 min 40 s)...")
+        print("[start] soft-start (~3 min)…")
         done: set[str] = set()
 
-        async def step(key: str, delay_before: float, start_fn):
+        async def run_step(key: str, wait: float, action):
             await self._boot_set_progress(done, current=key)
-            if delay_before > 0:
-                await asyncio.sleep(delay_before)
-            await self._boot_set_progress(done, current=key)
-            start_fn()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await action()
             done.add(key)
-            await self._boot_set_progress(done, current=None)
+            await self._boot_set_progress(done)
             print(f"[start] {key}")
 
-        # delays are gaps between steps (first = START_DELAY_LIVE)
-        await self._boot_set_progress(done, current="live")
-        await asyncio.sleep(START_DELAY_LIVE)
-        if not self.live_check.is_running():
-            self.live_check.start()
-        done.add("live")
-        await self._boot_set_progress(done)
-        print("[start] live_check")
+        async def start_live():
+            if not self.live_check.is_running():
+                self.live_check.start()
 
-        await self._boot_set_progress(done, current="prematch")
-        await asyncio.sleep(START_DELAY_PREMATCH - START_DELAY_LIVE)
-        if not self.prematch_check.is_running():
-            self.prematch_check.start()
-        done.add("prematch")
-        await self._boot_set_progress(done)
-        print("[start] prematch_check")
+        async def start_prematch():
+            if not self.prematch_check.is_running():
+                self.prematch_check.start()
 
-        await self._boot_set_progress(done, current="table")
-        await asyncio.sleep(START_DELAY_TABLE - START_DELAY_PREMATCH)
-        if not self.table_update.is_running():
-            self.table_update.start()
-        done.add("table")
-        await self._boot_set_progress(done)
-        print("[start] table_update")
+        async def start_daily():
+            if not self.daily_check.is_running():
+                self.daily_check.start()
 
-        await self._boot_set_progress(done, current="daily")
-        await asyncio.sleep(START_DELAY_DAILY - START_DELAY_TABLE)
-        if not self.daily_check.is_running():
-            self.daily_check.start()
-        done.add("daily")
-        await self._boot_set_progress(done)
-        print("[start] daily_check")
+        async def start_commands():
+            # 1 po drugiej: UI co COMMAND_START_GAP s, na końcu pełny sync
+            total = len(COMMAND_START_ORDER)
+            cmd_done: list[str] = []
+            for name in COMMAND_START_ORDER:
+                idx = len(cmd_done) + 1
+                try:
+                    msg = getattr(self, "_boot_msg", None)
+                    if msg:
+                        emb = self._boot_progress_embed(done, current="commands")
+                        emb.title = f"🚀 Start bota · komendy {idx}/{total}"
+                        emb.description = (
+                            f"Wersja **`{BOT_VERSION}`** · ładuję komendy "
+                            f"**{idx}/{total}** · teraz **`/{name}`**"
+                        )
+                        clines = []
+                        for n in COMMAND_START_ORDER:
+                            if n in cmd_done:
+                                clines.append(f"✅ /{n}")
+                            elif n == name:
+                                clines.append(f"🔄 /{n}…")
+                            else:
+                                clines.append(f"⏳ /{n}")
+                        mid = (len(clines) + 1) // 2
+                        emb.add_field(
+                            name=f"Komendy ({idx}/{total})",
+                            value="\n".join(clines[:mid]),
+                            inline=True,
+                        )
+                        emb.add_field(
+                            name="\u200b",
+                            value="\n".join(clines[mid:]),
+                            inline=True,
+                        )
+                        await msg.edit(embed=emb)
+                except Exception as e:
+                    print(f"[boot-cmd] {e}")
+                await asyncio.sleep(COMMAND_START_GAP)
+                cmd_done.append(name)
+                print(f"[start] komenda /{name} ({idx}/{total})")
 
-        await self._boot_set_progress(done, current="cleanup")
-        await asyncio.sleep(START_DELAY_CLEANUP - START_DELAY_DAILY)
-        if not self.cleanup_task.is_running():
-            self.cleanup_task.start()
-        done.add("cleanup")
-        await self._boot_set_progress(done)
-        print("[start] cleanup_task")
-
-        await self._boot_set_progress(done, current="status")
-        await asyncio.sleep(START_DELAY_STATUS - START_DELAY_CLEANUP)
-        if not self.status_loop.is_running():
-            self.status_loop.start()
-        done.add("status")
-        await self._boot_set_progress(done)
-        print("[start] status_loop")
-
-        await self._boot_set_progress(done, current="poll")
-        await asyncio.sleep(START_DELAY_POLL - START_DELAY_STATUS)
-        if not self.poll_check.is_running():
-            self.poll_check.start()
-        done.add("poll")
-        await self._boot_set_progress(done)
-        print("[start] poll_check")
-
-        await self._boot_set_progress(done, current="api")
-        await asyncio.sleep(START_DELAY_API - START_DELAY_POLL)
-        if not self.api_watch.is_running():
-            self.api_watch.start()
-        done.add("api")
-        await self._boot_set_progress(done)
-        print("[start] api_watch")
-
-        await self._boot_set_progress(done, current="event")
-        await asyncio.sleep(START_DELAY_EVENT - START_DELAY_API)
-        if not self.event_check.is_running():
-            self.event_check.start()
-        done.add("event")
-        await self._boot_set_progress(done)
-        print("[start] event_check")
-
-        await self._boot_set_progress(done, current="commands")
-        await asyncio.sleep(START_DELAY_COMMANDS - START_DELAY_EVENT)
-        cmd_done: list[str] = []
-        total_cmds = len(COMMAND_START_ORDER)
-        for name in COMMAND_START_ORDER:
-            # aktualizuj wiadomość startową: komendy ładują się (n/22)
-            try:
-                msg = getattr(self, "_boot_msg", None)
-                if msg:
-                    emb = self._boot_progress_embed(done, current="commands")
-                    idx = len(cmd_done) + 1
-                    emb.title = f"🚀 Start bota · komendy {idx}/{total_cmds}"
-                    emb.description = (
-                        f"Wersja **`{BOT_VERSION}`** · **ładuję komendy** "
-                        f"(`{idx}/{total_cmds}`) · teraz **`/{name}`**"
-                    )
-                    clines = []
-                    for n in COMMAND_START_ORDER:
-                        if n in cmd_done:
-                            clines.append(f"✅ /{n}")
-                        elif n == name:
-                            clines.append(f"🔄 /{n}…")
-                        else:
-                            clines.append(f"⏳ /{n}")
-                    mid = (len(clines) + 1) // 2
-                    emb.add_field(
-                        name=f"Komendy ({len(cmd_done)}/{total_cmds})",
-                        value="\n".join(clines[:mid]),
-                        inline=True,
-                    )
-                    emb.add_field(
-                        name="\u200b",
-                        value="\n".join(clines[mid:]),
-                        inline=True,
-                    )
-                    await msg.edit(embed=emb)
-            except Exception as e:
-                print(f"[boot-cmd] {e}")
-            await asyncio.sleep(COMMAND_START_GAP)
-            cmd_done.append(name)
-            print(f"[start] komenda /{name} ({len(cmd_done)}/{total_cmds})")
-        # Sync był już w setup_hook / on_ready – tu tylko UI postępu
-        print("[start] komendy: sync już wykonany przy starcie")
-        done.add("commands")
-        try:
-            msg = getattr(self, "_boot_msg", None)
-            if msg:
-                emb = self._boot_progress_embed(done)
-                total_cmds = len(COMMAND_START_ORDER)
-                emb.title = f"🚀 Start bota · komendy {total_cmds}/{total_cmds}"
-                emb.description = (
-                    f"Wersja **`{BOT_VERSION}`** · **komendy załadowane** "
-                    f"(`{total_cmds}/{total_cmds}`) · sync na Discord…"
-                )
-                clines = [f"✅ /{n}" for n in COMMAND_START_ORDER]
-                mid = (len(clines) + 1) // 2
-                emb.add_field(
-                    name=f"Komendy ({total_cmds}/{total_cmds})",
-                    value="\n".join(clines[:mid]),
-                    inline=True,
-                )
-                emb.add_field(name="\u200b", value="\n".join(clines[mid:]), inline=True)
-                await msg.edit(embed=emb)
-        except Exception as e:
-            print(f"[boot-cmd] {e}")
-        print("[start] commands sync – wszystkie komendy")
-
-        await self._boot_set_progress(done, current="update")
-        await asyncio.sleep(START_DELAY_UPDATE - START_DELAY_COMMANDS)
-        if not self.update_check.is_running():
-            self.update_check.start()
-        done.add("update")
-        await self._boot_set_progress(done)
-        print("[start] update_check")
-
-        await self._boot_set_progress(done, current="weekly")
-        await asyncio.sleep(START_DELAY_WEEKLY - START_DELAY_UPDATE)
-        if not self.weekly_summary.is_running():
-            self.weekly_summary.start()
-        done.add("weekly")
-        await self._boot_set_progress(done)
-        print("[start] weekly_summary – soft-start zakończony")
-
-
-
-    async def handle_sklad_confirm(self, interaction: discord.Interaction, mid: int, ans: str):
-        """Gracz potwierdza / odmawia udziału w składzie (z DM)."""
-        uid = interaction.user.id
-        data = _lineup_confirms(mid)
-        ids_raw = db.get_config(f"lineup_{mid}") or "[]"
-        try:
-            roster = [int(x) for x in json.loads(ids_raw)]
-        except Exception:
-            roster = []
-        if uid not in roster:
-            await interaction.response.send_message(
-                "Nie jesteś na liście składu tego meczu.", ephemeral=True
-            )
-            return
-        data[str(uid)] = ans
-        _set_lineup_confirms(mid, data)
-
-        label = "Gram ✅" if ans == "yes" else "Nie mogę ❌"
-        try:
-            await interaction.response.edit_message(
-                content=f"Zapisano: **{label}**\nDzięki! Kapitan dostanie podsumowanie.",
-                embed=None,
-                view=None,
-            )
-        except Exception:
-            await interaction.response.send_message(f"Zapisano: **{label}**", ephemeral=True)
-
-        # Podsumowanie
-        yes, no, pending = [], [], []
-        for pid in roster:
-            st = data.get(str(pid))
-            mention = f"<@{pid}>"
-            if st == "yes":
-                yes.append(mention)
-            elif st == "no":
-                no.append(mention)
-            else:
-                pending.append(mention)
-
-        # DM do właściciela serwera (pierwszy guild bota z ownerem)
-        owner = None
-        guild = interaction.guild
-        if guild and guild.owner:
-            owner = guild.owner
-        if owner is None:
-            for g in self.guilds:
-                if g.owner_id:
-                    try:
-                        owner = g.get_member(g.owner_id) or await g.fetch_member(g.owner_id)
-                    except Exception:
-                        owner = None
-                    if owner:
-                        break
-
-        lines = [
-            f"**Mecz ID `{mid}`** – odpowiedź od <@{uid}>: **{label}**",
-            f"✅ Mogą grać ({len(yes)}): {', '.join(yes) or '—'}",
-            f"❌ Nie mogą ({len(no)}): {', '.join(no) or '—'}",
-            f"⏳ Brak odpowiedzi ({len(pending)}): {', '.join(pending) or '—'}",
-        ]
-        if not pending and yes and not no:
-            lines.insert(0, "🎉 **Cały skład potwierdził dostępność!**")
-        elif not pending:
-            lines.insert(0, "📋 **Wszyscy z składu odpowiedzieli.**")
-
-        text = "\n".join(lines)
-        if owner:
-            try:
-                await owner.send(text)
-            except Exception as e:
-                print(f"[sklad-dm-owner] {e}")
-        print(f"[sklad] confirm mid={mid} uid={uid} ans={ans}")
-
-
-
-    async def _sync_commands_after_delay(self):
-        """Rejestruje slash-komendy po ustalonym opóźnieniu od startu."""
-        await self.wait_until_ready()
-        delay = globals().get("START_DELAY_COMMANDS_SYNC", 60)
-        print(f"[sync] komendy za {delay}s…")
-        try:
-            msg = getattr(self, "_boot_msg", None)
-            if msg:
-                emb = self._boot_progress_embed(set(), current="commands")
-                emb.title = f"🚀 Start bota · komendy za {delay}s"
-                emb.description = f"Wersja **`{BOT_VERSION}`** · rejestracja komend za **{delay} s**"
-                await msg.edit(embed=emb)
-        except Exception:
-            pass
-        await asyncio.sleep(delay)
-        try:
             for guild in self.guilds:
                 try:
                     synced = await self.tree.sync(guild=guild)
                     print(f"[sync] {guild.name}: {len(synced)} komend")
                 except Exception as e:
                     print(f"[sync] guild {guild.id}: {e}")
-            synced = await self.tree.sync()
-            print(f"[sync] global: {len(synced)} komend -> {[c.name for c in synced]}")
-        except Exception as e:
-            print(f"[sync] blad: {e}")
-        try:
-            msg = getattr(self, "_boot_msg", None)
-            if msg:
-                emb = self._boot_progress_embed(set(), current=None)
-                emb.title = "✅ Komendy zarejestrowane"
-                emb.description = f"Wersja **`{BOT_VERSION}`** · slash-komendy aktywne"
-                await msg.edit(embed=emb)
-        except Exception:
-            pass
+            try:
+                synced = await self.tree.sync()
+                print(f"[sync] global: {len(synced)} komend -> {[c.name for c in synced]}")
+            except Exception as e:
+                print(f"[sync] global blad: {e}")
+
+        async def start_table():
+            if not self.table_update.is_running():
+                self.table_update.start()
+
+        async def start_status():
+            if not self.status_loop.is_running():
+                self.status_loop.start()
+
+        async def start_poll():
+            if not self.poll_check.is_running():
+                self.poll_check.start()
+
+        async def start_api():
+            if not self.api_watch.is_running():
+                self.api_watch.start()
+
+        async def start_event():
+            if not self.event_check.is_running():
+                self.event_check.start()
+
+        async def start_cleanup():
+            if not self.cleanup_task.is_running():
+                self.cleanup_task.start()
+
+        async def start_update():
+            if not self.update_check.is_running():
+                self.update_check.start()
+
+        async def start_weekly():
+            if not self.weekly_summary.is_running():
+                self.weekly_summary.start()
+
+        # Faza 1 – mecz
+        await run_step("live", START_DELAY_LIVE, start_live)
+        await run_step("prematch", START_DELAY_PREMATCH - START_DELAY_LIVE, start_prematch)
+        await run_step("daily", START_DELAY_DAILY - START_DELAY_PREMATCH, start_daily)
+        # Faza 2 – komendy @ 60s
+        await run_step("commands", START_DELAY_COMMANDS - START_DELAY_DAILY, start_commands)
+        # Faza 3 – tło
+        await run_step("table", START_DELAY_TABLE - START_DELAY_COMMANDS, start_table)
+        await run_step("status", START_DELAY_STATUS - START_DELAY_TABLE, start_status)
+        await run_step("poll", START_DELAY_POLL - START_DELAY_STATUS, start_poll)
+        await run_step("api", START_DELAY_API - START_DELAY_POLL, start_api)
+        await run_step("event", START_DELAY_EVENT - START_DELAY_API, start_event)
+        # Faza 4 – utrzymanie
+        await run_step("cleanup", START_DELAY_CLEANUP - START_DELAY_EVENT, start_cleanup)
+        await run_step("update", START_DELAY_UPDATE - START_DELAY_CLEANUP, start_update)
+        await run_step("weekly", START_DELAY_WEEKLY - START_DELAY_UPDATE, start_weekly)
+
+        print("[start] soft-start zakończony")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
+
         uid = interaction.user.id
         if interaction.guild:
             return uid == interaction.guild.owner_id
@@ -1687,7 +1534,7 @@ class PindolzBot(commands.Bot):
         r.raise_for_status()
         return r.text.strip()
 
-    @tasks.loop(hours=6)
+    @tasks.loop(hours=1)
     async def update_check(self):
         if not feature_on("updates"):
             return
