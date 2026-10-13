@@ -1,4 +1,4 @@
-> **Wersja bota: `1.4.8`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.4.10`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -12,16 +12,13 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 - Terminarz i wyniki – **edycja** wiadomości zamiast spamu
 - **LIVE** co **5 s** podczas meczu / **10 s** gdy nie gra
-- Przycisk **Kanał LIVE** + opcjonalny wątek
-- Tabela dywizji (+ zmiany pozycji) o stałych godzinach
-- Przypomnienia **30 min** i **1 h** przed meczem
-- Zmiana terminu, walkower, forma, reakcje, przycisk **GG**
-- **`/sklad`** – skład na mecz + **DM do graczy** (Gram / Nie mogę) + raport do kapitana
-- **Komendy w DM** – panel kapitana, status składu, ponowienie DM, status gracza
-- GIF po wygranej, powiązania nicków (`/polacz`), ankiety, wydarzenia Discord
-- Soft-start tasków + wiadomość startowa z postępem ładowania
-- Sync slash-komend **60 s po starcie** (global + serwer)
-- Cache API, SQLite po restarcie, przełączniki w `/ustawienia`
+- Soft-start w 4 fazach (~3 min) + wiadomość startowa z postępem
+- Sync slash-komend **60 s** po starcie
+- **`/sklad`** – skład + DM (Gram / Nie mogę) + raport do kapitana
+- Komendy w **DM**: `/panel`, `/sklad-status`, `/ping-sklad`, `/moj-status`, `/pomoc`
+- Tabela, prematch, ankiety, GIF, powiązania graczy
+- Sprawdzanie nowej wersji na GitHubie **co 1 h**
+- Cache API, SQLite, `/ustawienia`
 
 ---
 
@@ -32,7 +29,7 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 | Komenda | Opis |
 |---------|------|
 | `/pindolz` | Najbliższe + ostatnie mecze |
-| `/live` | Czy PINDOLZ gra teraz |
+| `/live` | Czy gra teraz |
 | `/wyniki` | Ostatnie wyniki |
 | `/nadchodzace` | Przyszłe mecze |
 | `/tabela` | Tabela dywizji |
@@ -40,42 +37,18 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 | `/wersja` | Wersja bota |
 | `/pomoc` | Lista komend (inna treść w DM) |
 | `/gracze` | Powiązania Discord ↔ nick |
-| `/moj-status` | Czy jesteś w składzie i co odpisałeś |
+| `/moj-status` | Status w składzie |
 
-### Właściciel serwera
+### Właściciel
 
 | Komenda | Opis |
 |---------|------|
-| `/setup` | Kanał główny |
-| `/setup-live` | Kanał LIVE |
-| `/setup-tabela` | Kanał tabeli |
-| `/setup-ankiety` | Kanał ankiet |
-| `/setup-all` | Wszystkie kanały naraz |
-| `/ankieta-role` | Role do pingu ankiet |
-| `/ustawienia` | Włącz / wyłącz funkcje |
-| `/pokaz-embedy` | Podgląd kart |
-| `/sklad` | Skład + DM z prośbą o potwierdzenie |
-| `/polacz` | Powiąż osobę z nickiem w lidze |
-| `/gif-dodaj` / `/gif-lista` / `/gif-usun` | GIF-y po wygranej |
-| `/panel` | Panel kapitana (wygodne w DM) |
-| `/sklad-status` | Status potwierdzeń składu |
-| `/ping-sklad` | Ponów DM do osób bez odpowiedzi |
-
----
-
-## Komendy w DM
-
-Napisz do bota prywatnie i użyj `/`:
-
-| Komenda | Kto |
-|---------|-----|
-| `/panel` | właściciel |
-| `/sklad-status` | właściciel |
-| `/ping-sklad` | właściciel |
-| `/moj-status` | każdy |
-| `/pomoc` | każdy (lista pod DM) |
-
-Bot może pisać pierwszy DM tylko do osób, które mogą otrzymywać PW (np. po wspólnym serwerze / otwartych wiadomościach).
+| `/setup` `/setup-live` `/setup-tabela` `/setup-ankiety` `/setup-all` | Kanały |
+| `/ankieta-role` `/ustawienia` `/pokaz-embedy` | Konfiguracja |
+| `/sklad` | Skład + DM potwierdzeń |
+| `/polacz` | Nick w lidze |
+| `/gif-dodaj` `/gif-lista` `/gif-usun` | GIF po wygranej |
+| `/panel` `/sklad-status` `/ping-sklad` | Panel kapitana (też DM) |
 
 ---
 
@@ -83,76 +56,48 @@ Bot może pisać pierwszy DM tylko do osób, które mogą otrzymywać PW (np. po
 
 | Czas | Co |
 |------|-----|
-| **0 s** | Login, SQLite, widoki |
-| **60 s** | **Sync komend** (slash) |
-| **20 s** | LIVE |
-| **35 s** | Prematch |
-| **45 s** | Tabela |
-| **60 s** | Daily |
-| **80 s** | Cleanup |
-| **100 s** | Status |
-| **120 s** | Ankiety |
-| **140 s** | API watch |
-| **160 s** | Eventy |
-| **180 s+** | Postęp komend w wiadomości startowej (UI) |
-| **~200 s** | Update GitHub |
-| **~220 s** | Weekly – koniec |
+| **15 s** | LIVE |
+| **30 s** | Prematch |
+| **45 s** | Daily |
+| **60 s** | **Sync komend** |
+| **75 s** | Tabela |
+| **90 s** | Status |
+| **105 s** | Ankiety |
+| **120 s** | API watch |
+| **135 s** | Eventy |
+| **150 s** | Cleanup |
+| **165 s** | Update GitHub (task start) |
+| **180 s** | Weekly – koniec |
 
-Wiadomość startowa pokazuje ✅ / 🔄 / ⏳ i znika po 10 min.
+Potem update wersji z GitHuba **co 1 godzinę**.
 
 ---
 
-## Harmonogram (Europe/Warsaw)
+## Harmonogram
 
 | Co | Kiedy |
 |----|-------|
-| LIVE | 5 s (mecz) / 10 s (brak) |
+| LIVE | 5 s / 10 s |
 | Prematch | co 1 min |
 | Daily | co 10 min |
 | Tabela | 08:00, 18:00, 20:00, 21:30, 23:00 |
 | Weekly | niedziela 20:00 |
 | Cleanup | 04:00 |
-| Update GitHub | co 6 h |
+| Update GitHub | **co 1 h** |
 
 ---
 
-## Instalacja (GameHost)
+## GameHost
 
 | Pole | Wartość |
 |------|---------|
-| Git Repo Address | `https://github.com/grabowsky721/starterleauge` |
-| Git Branch | `main` |
+| Git Repo | `https://github.com/grabowsky721/starterleauge` |
+| Branch | `main` |
 | Auto Update | `1` |
-| Bot py file | **`src/bot.py`** |
-| Requirements file | `requirements.txt` |
+| Bot py file | `src/bot.py` |
+| Requirements | `requirements.txt` |
 
-**Sekrety:** `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
-
-Po starcie w logu: `[sync] komendy za 60s…`, potem `[sync] global: …` / `[sync] NazwaSerwera: …`.
-
-Na Discordzie (właściciel):
-
-```
-/setup-all #wyniki #live #tabela
-```
-
----
-
-## Struktura
-
-```
-├── VERSION
-├── requirements.txt
-├── README.md
-└── src/
-    ├── bot.py
-    ├── client.py
-    ├── db.py
-    ├── embeds.py
-    └── main.py
-```
-
-Dane → katalog `data/` (SQLite).
+Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
 
 ---
 
@@ -164,10 +109,4 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 ```
 
----
-
-## Uwagi
-
-- Tokenów nie trzymaj w repozytorium.
-- Team ID PINDOLZ: **869**.
-- Wersja: zgodne `VERSION` + README + `/wersja`.
+Team ID: **869**. Wersja: zgodne `VERSION` + README + `/wersja`.
