@@ -335,6 +335,34 @@ def _set_lineup_confirms(mid: int, data: dict[str, str]) -> None:
     db.set_config(_lineup_confirm_key(mid), json.dumps(data))
 
 
+def _lineup_presets() -> dict[str, list[int]]:
+    """Nazwane składy: {"Główny": [uid, ...], ...}"""
+    try:
+        raw = json.loads(db.get_config("lineup_presets") or "{}")
+        out: dict[str, list[int]] = {}
+        for k, v in raw.items():
+            name = str(k).strip()[:32]
+            if not name:
+                continue
+            ids = []
+            for x in v or []:
+                try:
+                    ids.append(int(x))
+                except (TypeError, ValueError):
+                    pass
+            out[name] = list(dict.fromkeys(ids))[:7]
+        return out
+    except Exception:
+        return {}
+
+
+def _save_lineup_presets(presets: dict[str, list[int]]) -> None:
+    db.set_config(
+        "lineup_presets",
+        json.dumps({k: v for k, v in presets.items()}, ensure_ascii=False),
+    )
+
+
 class SkladConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_sklad:(?P<mid>\d+):(?P<ans>yes|no)"):
     def __init__(self, mid: int, ans: str):
         if ans == "yes":
@@ -360,6 +388,616 @@ def sklad_confirm_view(mid: int) -> discord.ui.View:
     view.add_item(SkladConfirmButton(mid, "yes"))
     view.add_item(SkladConfirmButton(mid, "no"))
     return view
+
+
+def _sklad_preview_embed(m: dict, mid: int, selected_ids: list[int]) -> discord.Embed:
+    """Embed panelu składu (interfejs)."""
+    opp = _match_opponent(m)
+    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    nicks = _player_nicks()
+    presets = _lineup_presets()
+    preset_info = f" · zapisane składy: **{len(presets)}**" if presets else ""
+    emb = discord.Embed(
+        title="👥 Panel składu",
+        description=(
+            f"**vs {opp}** · {when}\n"
+            f"Mecz `#{mid}`{preset_info}\n\n"
+            f"Wybierz graczy → **Zapisz na mecz** / **Zapisz + DM**.\n"
+            f"Albo **Zapisz jako…** (osobny skład) / wczytaj z listy."
+        ),
+        color=0x5865F2,
+    )
+    if selected_ids:
+        lines = []
+        for i, uid in enumerate(selected_ids, 1):
+            nick = nicks.get(uid)
+            extra = f" · `{nick}`" if nick else ""
+            lines.append(f"{i}. <@{uid}>{extra}")
+        emb.add_field(name=f"Wybrany skład ({len(selected_ids)}/7)", value="\n".join(lines), inline=False)
+    else:
+        emb.add_field(name="Wybrany skład", value="_pusto – wybierz graczy_", inline=False)
+    # status potwierdzeń jeśli już coś zapisane
+    try:
+        saved = [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
+    except Exception:
+        saved = []
+    if saved:
+        _, yes, no, pending = _lineup_status_lists(mid)
+        emb.add_field(
+            name="Ostatnie potwierdzenia",
+            value=f"✅ {len(yes)} · ❌ {len(no)} · ⏳ {len(pending)}",
+            inline=False,
+        )
+    emb.set_footer(text="Panel wygasa po 5 min · tylko właściciel")
+    return emb
+
+
+async def _sklad_send_confirmation_dms(m: dict, mid: int, ids: list[int]) -> tuple[list[str], list[str]]:
+    """Wyślij DM z prośbą o potwierdzenie. Zwraca (ok_mentions, fail_mentions)."""
+    opp = _match_opponent(m)
+    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    dm_ok, dm_fail = [], []
+    for uid in ids:
+        user = bot.get_user(uid)
+        if user is None:
+            try:
+                user = await bot.fetch_user(uid)
+            except Exception:
+                dm_fail.append(f"<@{uid}>")
+                continue
+        try:
+            emb = discord.Embed(
+                title="🎮 Potwierdzenie składu PINDOLZ",
+                description=(
+                    f"Zostałeś wpisany w skład na mecz.\n"
+                    f"**Rywal:** {opp}\n"
+                    f"**Termin:** {when}\n\n"
+                    f"Czy możesz grać? Kliknij poniżej."
+                ),
+                color=0x5865F2,
+            )
+            emb.set_footer(text=f"Mecz #{mid} · odpowiedź dostanie kapitan")
+            await user.send(embed=emb, view=sklad_confirm_view(mid))
+            dm_ok.append(f"<@{uid}>")
+        except Exception:
+            dm_fail.append(f"<@{uid}>")
+    return dm_ok, dm_fail
+
+
+class SkladPanelView(discord.ui.View):
+    """Interfejs składu: wielu graczy, zapis na mecz, wiele nazwanych składów."""
+
+    def __init__(self, mid: int, match: dict, owner_id: int, selected_ids: list[int] | None = None):
+        super().__init__(timeout=360)
+        self.mid = mid
+        self.match = match
+        self.owner_id = owner_id
+        self.selected_ids = list(dict.fromkeys(selected_ids or []))[:7]
+        self._rebuild_items()
+
+    def _rebuild_items(self):
+        self.clear_items()
+        self.add_item(SkladUserSelect(self))
+        presets = _lineup_presets()
+        if presets:
+            opts = [
+                discord.SelectOption(
+                    label=name[:100],
+                    value=name,
+                    description=f"{len(ids)} graczy"[:100],
+                )
+                for name, ids in list(presets.items())[:25]
+            ]
+            self.add_item(SkladPresetSelect(self, opts))
+        # buttons row 2-3
+        self.add_item(SkladBtnSaveMatch(self))
+        self.add_item(SkladBtnSaveDm(self))
+        self.add_item(SkladBtnSaveAs(self))
+        self.add_item(SkladBtnClear(self))
+        self.add_item(SkladBtnStatus(self))
+
+    def build_embed(self) -> discord.Embed:
+        emb = _sklad_preview_embed(self.match, self.mid, self.selected_ids)
+        presets = _lineup_presets()
+        if presets:
+            lines = [f"**{n}** ({len(ids)}): " + ", ".join(f"<@{i}>" for i in ids[:7]) for n, ids in list(presets.items())[:8]]
+            emb.add_field(name="Zapisane składy", value="\n".join(lines)[:1024], inline=False)
+        return emb
+
+    def _persist_match(self) -> list[int]:
+        ids = list(dict.fromkeys(self.selected_ids))[:7]
+        db.set_config(f"lineup_{self.mid}", json.dumps(ids))
+        if ids:
+            _set_lineup_confirms(self.mid, {str(i): "pending" for i in ids})
+        else:
+            _set_lineup_confirms(self.mid, {})
+        print(f"[sklad] mecz mid={self.mid} ids={ids}")
+        return ids
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Tylko właściciel może sterować składem.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class SkladUserSelect(discord.ui.UserSelect):
+    def __init__(self, panel: "SkladPanelView"):
+        super().__init__(
+            placeholder="Wybierz graczy do składu (max 7)…",
+            min_values=1,
+            max_values=7,
+            row=0,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        ids = [int(u.id) for u in self.values if not getattr(u, "bot", False)]
+        self.panel.selected_ids = list(dict.fromkeys(ids))[:7]
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+
+
+class SkladPresetSelect(discord.ui.Select):
+    def __init__(self, panel: "SkladPanelView", options: list):
+        super().__init__(
+            placeholder="Wczytaj lub usuń zapisany skład…",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        name = self.values[0]
+        presets = _lineup_presets()
+        ids = presets.get(name, [])
+        self.panel.selected_ids = list(ids)[:7]
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+        await interaction.followup.send(
+            f"Wczytano skład **{name}** ({len(ids)} os.). Zapisz na mecz przyciskiem **Zapisz na mecz**.",
+            ephemeral=True,
+        )
+
+
+class SkladBtnSaveMatch(discord.ui.Button):
+    def __init__(self, panel: "SkladPanelView"):
+        super().__init__(label="Zapisz na mecz", style=discord.ButtonStyle.primary, emoji="💾", row=2)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.panel.selected_ids:
+            await interaction.response.send_message("Wybierz graczy albo wczytaj zapisany skład.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        ids = self.panel._persist_match()
+        emb = embeds.lineup_embed(self.panel.match, ids, _player_nicks())
+        await interaction.edit_original_response(embed=emb, view=self.panel)
+        await interaction.followup.send(
+            f"✅ Skład na mecz zapisany ({len(ids)} os.): " + ", ".join(f"<@{i}>" for i in ids),
+            ephemeral=True,
+        )
+        try:
+            await bot.event_check.coro(bot)
+        except Exception as e:
+            print(f"[sklad] event: {e}")
+
+
+class SkladBtnSaveDm(discord.ui.Button):
+    def __init__(self, panel: "SkladPanelView"):
+        super().__init__(label="Zapisz + DM", style=discord.ButtonStyle.success, emoji="📨", row=2)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.panel.selected_ids:
+            await interaction.response.send_message("Wybierz graczy najpierw.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        ids = self.panel._persist_match()
+        emb = embeds.lineup_embed(self.panel.match, ids, _player_nicks())
+        await interaction.edit_original_response(embed=emb, view=self.panel)
+        dm_ok, dm_fail = await _sklad_send_confirmation_dms(self.panel.match, self.panel.mid, ids)
+        parts = [f"✅ Zapisano na mecz ({len(ids)} os.)"]
+        if dm_ok:
+            parts.append(f"DM: {', '.join(dm_ok)}")
+        if dm_fail:
+            parts.append(f"Bez PW: {', '.join(dm_fail)}")
+        await interaction.followup.send("\n".join(parts), ephemeral=True)
+        try:
+            await bot.event_check.coro(bot)
+        except Exception as e:
+            print(f"[sklad] event: {e}")
+
+
+class SkladBtnSaveAs(discord.ui.Button):
+    def __init__(self, panel: "SkladPanelView"):
+        super().__init__(label="Zapisz jako…", style=discord.ButtonStyle.secondary, emoji="📁", row=2)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.panel.selected_ids:
+            await interaction.response.send_message("Wybierz graczy, żeby zapisać skład pod nazwą.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SkladNameModal(self.panel))
+
+
+class SkladBtnClear(discord.ui.Button):
+    def __init__(self, panel: "SkladPanelView"):
+        super().__init__(label="Wyczyść", style=discord.ButtonStyle.danger, emoji="🧹", row=3)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        self.panel.selected_ids = []
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+
+
+class SkladBtnStatus(discord.ui.Button):
+    def __init__(self, panel: "SkladPanelView"):
+        super().__init__(label="Status", style=discord.ButtonStyle.secondary, emoji="📋", row=3)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=_lineup_status_embed(self.panel.match, self.panel.mid),
+            ephemeral=True,
+        )
+
+
+class SkladNameModal(discord.ui.Modal, title="Nazwa składu"):
+    name = discord.ui.TextInput(
+        label="Nazwa składu",
+        placeholder="np. Główny, Rezerwa, Scrim",
+        max_length=32,
+        required=True,
+    )
+
+    def __init__(self, panel: "SkladPanelView"):
+        super().__init__()
+        self.panel = panel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = str(self.name.value).strip()[:32]
+        if not name:
+            await interaction.response.send_message("Podaj nazwę.", ephemeral=True)
+            return
+        presets = _lineup_presets()
+        presets[name] = list(dict.fromkeys(self.panel.selected_ids))[:7]
+        _save_lineup_presets(presets)
+        self.panel._rebuild_items()
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+        await interaction.followup.send(
+            f"✅ Zapisano skład **{name}** ({len(presets[name])} os.). Możesz go potem wczytać z listy.",
+            ephemeral=True,
+        )
+
+
+
+
+class SetupPanelView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.main_id: int | None = db.get_config_int("main_channel_id")
+        self.live_id: int | None = db.get_config_int("live_channel_id")
+        self.table_id: int | None = db.get_config_int("table_channel_id")
+        self.add_item(SetupChannelSelect(self, "main", "Kanał główny (wyniki)", 0))
+        self.add_item(SetupChannelSelect(self, "live", "Kanał LIVE", 1))
+        self.add_item(SetupChannelSelect(self, "table", "Kanał tabeli", 2))
+
+    def build_embed(self) -> discord.Embed:
+        def ch(cid):
+            return f"<#{cid}>" if cid else "_nie ustawiono_"
+        emb = discord.Embed(title="⚙️ Setup kanałów", description="Wybierz kanały, potem **Zapisz**.", color=0x5865F2)
+        emb.add_field(name="Główny", value=ch(self.main_id), inline=True)
+        emb.add_field(name="LIVE", value=ch(self.live_id), inline=True)
+        emb.add_field(name="Tabela", value=ch(self.table_id), inline=True)
+        emb.set_footer(text="Tylko właściciel · panel 5 min")
+        return emb
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Tylko właściciel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Zapisz", style=discord.ButtonStyle.success, emoji="💾", row=3)
+    async def btn_save(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (self.main_id and self.live_id and self.table_id):
+            await interaction.response.send_message("Ustaw wszystkie trzy kanały.", ephemeral=True)
+            return
+        db.set_config("main_channel_id", str(self.main_id))
+        db.set_config("live_channel_id", str(self.live_id))
+        db.set_config("table_channel_id", str(self.table_id))
+        await interaction.response.defer(ephemeral=True)
+        note = ""
+        try:
+            table = bot.api.get_division6_table()
+            if table and interaction.guild:
+                ch = interaction.guild.get_channel(self.table_id)
+                if ch:
+                    emb = embeds.standings_embed(table, changes=bot._rank_changes(table))
+                    msg = await ch.send(embed=emb, view=refresh_view("tabela"))
+                    db.set_config("msg_table_id", str(msg.id))
+                    db.set_config("msg_table_ch", str(self.table_id))
+                    note = "\nTabela wysłana."
+        except Exception as e:
+            note = f"\nTabela: {e}"
+        await interaction.followup.send(
+            f"**Setup OK**\nGłówny: <#{self.main_id}>\nLIVE: <#{self.live_id}>\nTabela: <#{self.table_id}>{note}",
+            ephemeral=True,
+        )
+
+
+class SetupChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, panel: "SetupPanelView", kind: str, placeholder: str, row: int):
+        super().__init__(placeholder=placeholder, channel_types=[discord.ChannelType.text], min_values=1, max_values=1, row=row)
+        self.panel = panel
+        self.kind = kind
+
+    async def callback(self, interaction: discord.Interaction):
+        ch = self.values[0]
+        cid = getattr(ch, "id", int(ch))
+        if self.kind == "main":
+            self.panel.main_id = cid
+        elif self.kind == "live":
+            self.panel.live_id = cid
+        else:
+            self.panel.table_id = cid
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+
+
+class PolaczPanelView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.selected_user = None
+        self.add_item(PolaczUserSelect(self))
+
+    def build_embed(self) -> discord.Embed:
+        nicks = _player_nicks()
+        emb = discord.Embed(title="🔗 Powiązanie z nickiem", description="Wybierz osobę → **Ustaw nick** / **Usuń**.", color=0x5865F2)
+        if self.selected_user:
+            uid = self.selected_user.id
+            cur = nicks.get(uid)
+            emb.add_field(name="Osoba", value=f"{self.selected_user.mention}" + (f" → `{cur}`" if cur else " _(brak)_"), inline=False)
+        else:
+            emb.add_field(name="Osoba", value="_nie wybrano_", inline=False)
+        if nicks:
+            lines = [f"<@{u}> → `{n}`" for u, n in list(nicks.items())[:15]]
+            emb.add_field(name="Lista", value="\n".join(lines), inline=False)
+        return emb
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Tylko właściciel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Ustaw nick", style=discord.ButtonStyle.primary, emoji="✏️", row=1)
+    async def btn_set(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_user:
+            await interaction.response.send_message("Najpierw wybierz osobę.", ephemeral=True)
+            return
+        await interaction.response.send_modal(PolaczNickModal(self.selected_user.id, self))
+
+    @discord.ui.button(label="Usuń powiązanie", style=discord.ButtonStyle.danger, emoji="🗑️", row=1)
+    async def btn_del(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_user:
+            await interaction.response.send_message("Najpierw wybierz osobę.", ephemeral=True)
+            return
+        nicks = _player_nicks()
+        nicks.pop(self.selected_user.id, None)
+        db.set_config("player_links", json.dumps({str(k): v for k, v in nicks.items()}))
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+class PolaczUserSelect(discord.ui.UserSelect):
+    def __init__(self, panel: "PolaczPanelView"):
+        super().__init__(placeholder="Wybierz osobę…", min_values=1, max_values=1, row=0)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        self.panel.selected_user = self.values[0]
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+
+
+class PolaczNickModal(discord.ui.Modal, title="Nick w lidze"):
+    nick = discord.ui.TextInput(label="Nick gracza", placeholder="np. PlayerOne", max_length=32)
+
+    def __init__(self, user_id: int, panel: "PolaczPanelView"):
+        super().__init__()
+        self.user_id = user_id
+        self.panel = panel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        nicks = _player_nicks()
+        nicks[self.user_id] = str(self.nick.value).strip()
+        db.set_config("player_links", json.dumps({str(k): v for k, v in nicks.items()}))
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+        await interaction.followup.send(f"Zapisano: <@{self.user_id}> → `{str(self.nick.value).strip()}`", ephemeral=True)
+
+
+class AnkietaRoleView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        try:
+            self.role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
+        except Exception:
+            self.role_ids = []
+        self.add_item(AnkietaRoleSelect(self))
+
+    def build_embed(self) -> discord.Embed:
+        emb = discord.Embed(title="📣 Role do ankiet", description="Wybierz do 5 ról, potem **Zapisz**.", color=0x5865F2)
+        emb.add_field(name="Wybrane", value=", ".join(f"<@&{r}>" for r in self.role_ids) or "_brak_", inline=False)
+        return emb
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Tylko właściciel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Zapisz", style=discord.ButtonStyle.success, row=1)
+    async def btn_save(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db.set_config("poll_role_ids", json.dumps(self.role_ids))
+        await interaction.response.edit_message(embed=self.build_embed(), view=None)
+        await interaction.followup.send("Zapisano role: " + (", ".join(f"<@&{r}>" for r in self.role_ids) or "brak"), ephemeral=True)
+
+    @discord.ui.button(label="Wyczyść", style=discord.ButtonStyle.danger, row=1)
+    async def btn_clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.role_ids = []
+        db.set_config("poll_role_ids", "[]")
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+class AnkietaRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, panel: "AnkietaRoleView"):
+        super().__init__(placeholder="Wybierz role…", min_values=0, max_values=5, row=0)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        self.panel.role_ids = [r.id for r in self.values][:5]
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+
+
+class GifListaView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        gifs = _win_gifs()
+        options = [discord.SelectOption(label=f"#{i} {g[:80]}"[:100], value=str(i)) for i, g in enumerate(gifs[:25], 1)]
+        if options:
+            self.add_item(GifRemoveSelect(self, options))
+
+    def build_embed(self) -> discord.Embed:
+        gifs = _win_gifs()
+        emb = embeds._base("🎞️ GIF-y po wygranej", embeds.C_INFO)
+        emb.description = ("\n".join(f"**{i}.** {g[:70]}" for i, g in enumerate(gifs, 1))[:4000] if gifs else "Brak GIF-ów. Dodaj `/gif-dodaj`.")
+        if gifs:
+            emb.set_footer(text="Wybierz pozycję, aby usunąć")
+        return emb
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Tylko właściciel.", ephemeral=True)
+            return False
+        return True
+
+
+class GifRemoveSelect(discord.ui.Select):
+    def __init__(self, panel: "GifListaView", options: list):
+        super().__init__(placeholder="Usuń GIF…", min_values=1, max_values=1, options=options, row=0)
+        self.panel = panel
+
+    async def callback(self, interaction: discord.Interaction):
+        numer = int(self.values[0])
+        gifs = _win_gifs()
+        if numer < 1 or numer > len(gifs):
+            await interaction.response.send_message("Zły numer.", ephemeral=True)
+            return
+        removed = gifs.pop(numer - 1)
+        db.set_config("win_gifs", json.dumps(gifs))
+        db.set_config("win_gif_last", None)
+        new_view = GifListaView(self.panel.owner_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(), view=new_view if gifs else None)
+        await interaction.followup.send(f"Usunięto #{numer}: `{removed[:80]}`", ephemeral=True)
+
+
+class CaptainPanelView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Tylko właściciel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.primary, emoji="🔄", row=0)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await interaction.edit_original_response(embed=await _build_captain_panel_embed(), view=self)
+
+    @discord.ui.button(label="Status składu", style=discord.ButtonStyle.secondary, emoji="📋", row=0)
+    async def btn_sklad(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+        except Exception as e:
+            await interaction.followup.send(f"Błąd API: {e}", ephemeral=True)
+            return
+        nxt = bot._next_match(upcoming)
+        if not nxt:
+            await interaction.followup.send("Brak nadchodzącego meczu.", ephemeral=True)
+            return
+        _, m = nxt
+        await interaction.followup.send(embed=_lineup_status_embed(m, int(m["id"])), ephemeral=True)
+
+    @discord.ui.button(label="Ping skład", style=discord.ButtonStyle.secondary, emoji="🔔", row=0)
+    async def btn_ping(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+        except Exception as e:
+            await interaction.followup.send(f"Błąd API: {e}", ephemeral=True)
+            return
+        nxt = bot._next_match(upcoming)
+        if not nxt:
+            await interaction.followup.send("Brak nadchodzącego meczu.", ephemeral=True)
+            return
+        _, m = nxt
+        mid = int(m["id"])
+        roster, _, _, _ = _lineup_status_lists(mid)
+        data = _lineup_confirms(mid)
+        pending_ids = [pid for pid in roster if data.get(str(pid)) not in ("yes", "no")]
+        if not pending_ids:
+            await interaction.followup.send("Wszyscy już odpowiedzieli.", ephemeral=True)
+            return
+        dm_ok, dm_fail = await _sklad_send_confirmation_dms(m, mid, pending_ids)
+        parts = []
+        if dm_ok:
+            parts.append(f"Wysłano: {', '.join(dm_ok)}")
+        if dm_fail:
+            parts.append(f"Błąd PW: {', '.join(dm_fail)}")
+        await interaction.followup.send("\n".join(parts) or "OK", ephemeral=True)
+
+
+async def _build_captain_panel_embed() -> discord.Embed:
+    api_ok, api_msg = True, "OK"
+    try:
+        await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception as e:
+        api_ok, api_msg = False, str(e)[:120]
+    try:
+        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception:
+        upcoming = []
+    nxt = bot._next_match(upcoming) if upcoming else None
+    emb = discord.Embed(title="📌 Panel kapitana", color=0x5865F2 if api_ok else 0xED4245)
+    emb.add_field(name="API", value=("✅ " + api_msg) if api_ok else ("❌ " + api_msg), inline=False)
+    main_ch, live_ch, table_ch = bot._main_channel_id(), bot._live_channel_id(), bot._table_channel_id()
+    emb.add_field(
+        name="Kanały",
+        value=f"Główny: {f'<#{main_ch}>' if main_ch else '—'}\nLIVE: {f'<#{live_ch}>' if live_ch else '—'}\nTabela: {f'<#{table_ch}>' if table_ch else '—'}",
+        inline=False,
+    )
+    if not nxt:
+        emb.add_field(name="Najbliższy mecz", value="Brak w terminarzu", inline=False)
+    else:
+        _, m = nxt
+        mid = int(m["id"])
+        opp, when = _match_opponent(m), f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+        roster, yes, no, pending = _lineup_status_lists(mid)
+        emb.add_field(name="Najbliższy mecz", value=f"**vs {opp}** · {when}\nSkład: {len(roster)} · ✅{len(yes)} · ❌{len(no)} · ⏳{len(pending)}", inline=False)
+    emb.set_footer(text=f"Wersja {BOT_VERSION}")
+    return emb
+
 
 
 def _match_opponent(m: dict) -> str:
@@ -1750,27 +2388,16 @@ async def cmd_status(interaction: discord.Interaction):
     await interaction.followup.send(embed=emb, ephemeral=True)
 
 
-@bot.tree.command(name="setup-all", description="Ustaw wszystkie kanały naraz (właściciel)")
-@app_commands.describe(glowny="Kanał na wyniki i nadchodzące", live="Kanał LIVE", tabela="Kanał tabeli dywizji")
-async def cmd_setup_all(interaction: discord.Interaction, glowny: discord.TextChannel, live: discord.TextChannel, tabela: discord.TextChannel):
+@bot.tree.command(name="setup-all", description="Panel ustawiania kanałów (interfejs; właściciel)")
+async def cmd_setup_all(interaction: discord.Interaction):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
-    db.set_config("main_channel_id", str(glowny.id))
-    db.set_config("live_channel_id", str(live.id))
-    db.set_config("table_channel_id", str(tabela.id))
-    await interaction.response.defer(ephemeral=True)
-    try:
-        table = bot.api.get_division6_table()
-        if table:
-            emb = embeds.standings_embed(table, changes=bot._rank_changes(table))
-            msg = await tabela.send(embed=emb, view=refresh_view("tabela"))
-            db.set_config("msg_table_id", str(msg.id))
-            db.set_config("msg_table_ch", str(tabela.id))
-    except Exception as e:
-        await interaction.followup.send(f"Kanały ustawione, ale tabela: {e}\nGłówny: {glowny.mention} · LIVE: {live.mention} · Tabela: {tabela.mention}", ephemeral=True)
+    if interaction.guild is None:
+        await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
         return
-    await interaction.followup.send(f"**Setup OK**\nGłówny: {glowny.mention}\nLIVE: {live.mention}\nTabela: {tabela.mention}\nTabela: **08:00, 18:00, 20:00, 21:30, 23:00**", ephemeral=True)
+    view = SetupPanelView(interaction.user.id)
+    await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 @bot.tree.command(name="setup", description="Ustaw kanał główny (wyniki + nadchodzące)")
@@ -1882,25 +2509,16 @@ async def cmd_setup_ankiety(interaction: discord.Interaction, kanal: discord.Tex
     )
 
 
-@bot.tree.command(name="ankieta-role", description="Role pingowane przy ankiecie (bez argumentów czyści listę)")
-@app_commands.describe(rola1="Rola 1", rola2="Rola 2", rola3="Rola 3", rola4="Rola 4", rola5="Rola 5")
-async def cmd_ankieta_role(
-    interaction: discord.Interaction,
-    rola1: Optional[discord.Role] = None,
-    rola2: Optional[discord.Role] = None,
-    rola3: Optional[discord.Role] = None,
-    rola4: Optional[discord.Role] = None,
-    rola5: Optional[discord.Role] = None,
-):
+@bot.tree.command(name="ankieta-role", description="Panel ról do ankiet (interfejs; właściciel)")
+async def cmd_ankieta_role(interaction: discord.Interaction):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
-    roles = [r for r in (rola1, rola2, rola3, rola4, rola5) if r is not None]
-    db.set_config("poll_roles", json.dumps([r.id for r in roles]))
-    if roles:
-        await interaction.response.send_message("Ankieta będzie pingować: " + " ".join(r.mention for r in roles), ephemeral=True)
-    else:
-        await interaction.response.send_message("Lista ról wyczyszczona, ankieta nie będzie nikogo pingować.", ephemeral=True)
+    if interaction.guild is None:
+        await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
+        return
+    view = AnkietaRoleView(interaction.user.id)
+    await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 @bot.tree.command(name="ustawienia", description="Włączanie i wyłączanie funkcji bota (właściciel)")
@@ -1931,119 +2549,50 @@ async def cmd_pokaz_embedy(interaction: discord.Interaction):
                     await interaction.followup.send(f"Nie udało się pokazać „{n}”: {err}", ephemeral=True)
 
 
-@bot.tree.command(name="sklad", description="Ustaw skład na najbliższy mecz + DM z prośbą o potwierdzenie (właściciel)")
-@app_commands.describe(
-    gracz1="Gracz 1", gracz2="Gracz 2", gracz3="Gracz 3", gracz4="Gracz 4",
-    gracz5="Gracz 5", gracz6="Gracz 6", gracz7="Gracz 7",
-)
-async def cmd_sklad(
-    interaction: discord.Interaction,
-    gracz1: Optional[discord.Member] = None,
-    gracz2: Optional[discord.Member] = None,
-    gracz3: Optional[discord.Member] = None,
-    gracz4: Optional[discord.Member] = None,
-    gracz5: Optional[discord.Member] = None,
-    gracz6: Optional[discord.Member] = None,
-    gracz7: Optional[discord.Member] = None,
-):
+@bot.tree.command(name="sklad", description="Panel składu na najbliższy mecz (interfejs; właściciel)")
+async def cmd_sklad(interaction: discord.Interaction):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
-    await interaction.response.defer()
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Panel składu działa na serwerze (wybór graczy). Użyj `/sklad` na kanale drużyny.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
     try:
         upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
     except Exception as e:
-        await interaction.followup.send(f"Błąd API: {e}")
+        await interaction.followup.send(f"Błąd API: {e}", ephemeral=True)
         return
     nxt = bot._next_match(upcoming)
     if not nxt:
-        await interaction.followup.send("Brak nadchodzącego meczu z ustaloną datą, nie ma dla czego ustawić składu.")
+        await interaction.followup.send(
+            "Brak nadchodzącego meczu z ustaloną datą – nie ma dla czego ustawić składu.",
+            ephemeral=True,
+        )
         return
     _, m = nxt
     mid = int(m["id"])
-    players = [p for p in (gracz1, gracz2, gracz3, gracz4, gracz5, gracz6, gracz7) if p is not None]
-    ids = list(dict.fromkeys(p.id for p in players))
-    db.set_config(f"lineup_{mid}", json.dumps(ids))
-
-    # Reset potwierdzeń przy nowym składzie
-    if ids:
-        _set_lineup_confirms(mid, {str(i): "pending" for i in ids})
-    else:
-        _set_lineup_confirms(mid, {})
-
-    await interaction.followup.send(embed=embeds.lineup_embed(m, ids, _player_nicks()))
-
-    # DM do każdego gracza: czy może grać?
-    dm_ok, dm_fail = [], []
-    opp = "?"
     try:
-        t1, t2 = m.get("team1") or {}, m.get("team2") or {}
-        n1, n2 = t1.get("name") or "?", t2.get("name") or "?"
-        opp = n2 if "pindolz" in n1.lower() else n1
+        current = [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
     except Exception:
-        pass
-    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
-
-    for member in players:
-        try:
-            emb = discord.Embed(
-                title="🎮 Potwierdzenie składu PINDOLZ",
-                description=(
-                    f"Zostałeś wpisany w skład na mecz.\n"
-                    f"**Rywal:** {opp}\n"
-                    f"**Termin:** {when}\n\n"
-                    f"Czy możesz grać? Kliknij poniżej."
-                ),
-                color=0x5865F2,
-            )
-            emb.set_footer(text=f"Mecz #{mid} · odpowiedź dostanie kapitan")
-            await member.send(embed=emb, view=sklad_confirm_view(mid))
-            dm_ok.append(member.mention)
-        except Exception:
-            dm_fail.append(member.mention)
-
-    summary = []
-    if dm_ok:
-        summary.append(f"DM wysłane do: {', '.join(dm_ok)}")
-    if dm_fail:
-        summary.append(f"Nie udało się wysłać DM (zamknięte PW?): {', '.join(dm_fail)}")
-    if not ids:
-        summary.append("Skład wyczyszczony – bez zapytań DM.")
-    if summary:
-        await interaction.followup.send("\n".join(summary), ephemeral=True)
-
-    try:
-        await bot.event_check.coro(bot)  # od razu odśwież opis wydarzenia serwera
-    except Exception as e:
-        print(f"[sklad] event: {e}")
+        current = []
+    view = SkladPanelView(mid, m, interaction.user.id, selected_ids=current)
+    await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
 
 
-@bot.tree.command(name="polacz", description="Powiąż osobę z nickiem gracza w lidze (bez nicku usuwa; właściciel)")
-@app_commands.describe(osoba="Osoba na serwerze", nick="Nick gracza w lidze (puste = usuń powiązanie)")
-async def cmd_polacz(interaction: discord.Interaction, osoba: discord.Member, nick: Optional[str] = None):
+@bot.tree.command(name="polacz", description="Panel powiązań gracz ↔ nick (interfejs; właściciel)")
+async def cmd_polacz(interaction: discord.Interaction):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
-    none = discord.AllowedMentions.none()
-    nicks = _player_nicks()
-    if nick is None or not nick.strip():
-        if nicks.pop(osoba.id, None) is None:
-            await interaction.response.send_message(f"{osoba.mention} nie ma powiązanego nicku.", ephemeral=True, allowed_mentions=none)
-            return
-        db.set_config("player_links", json.dumps({str(k): v for k, v in nicks.items()}))
-        await interaction.response.send_message(f"Usunięto powiązanie dla {osoba.mention}.", allowed_mentions=none)
+    if interaction.guild is None:
+        await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
         return
-    nick = nick.strip()
-    if not 2 <= len(nick) <= 32 or "`" in nick or "\n" in nick:
-        await interaction.response.send_message("Nick musi mieć 2–32 znaki i nie może zawierać znaku ` ani nowej linii.", ephemeral=True)
-        return
-    taken = next((uid for uid, n in nicks.items() if uid != osoba.id and n.casefold() == nick.casefold()), None)
-    if taken:
-        await interaction.response.send_message(f"Nick `{nick}` jest już powiązany z <@{taken}>.", ephemeral=True, allowed_mentions=none)
-        return
-    nicks[osoba.id] = nick
-    db.set_config("player_links", json.dumps({str(k): v for k, v in nicks.items()}))
-    await interaction.response.send_message(f"🔗 Powiązano {osoba.mention} z nickiem `{nick}`.", allowed_mentions=none)
+    view = PolaczPanelView(interaction.user.id)
+    await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 @bot.tree.command(name="gracze", description="Lista graczy powiązanych z nickami w lidze")
@@ -2073,18 +2622,14 @@ async def cmd_gif_dodaj(interaction: discord.Interaction, link: str):
     await interaction.response.send_message(f"🎞️ Dodano jako #{len(gifs)} (na liście: {len(gifs)}). Podgląd:\n{link}", ephemeral=True)
 
 
-@bot.tree.command(name="gif-lista", description="Lista GIF-ów losowanych po wygranej (właściciel)")
+@bot.tree.command(name="gif-lista", description="Lista GIF-ów z usuwaniem (interfejs; właściciel)")
 async def cmd_gif_lista(interaction: discord.Interaction):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
+    view = GifListaView(interaction.user.id)
     gifs = _win_gifs()
-    emb = embeds._base("🎞️ GIF-y po wygranej", embeds.C_INFO)
-    if gifs:
-        emb.description = "\n".join(f"**{i}.** {g[:70]}" for i, g in enumerate(gifs, 1))[:4000]
-    else:
-        emb.description = "Lista jest pusta. Dodaj pierwszy GIF komendą `/gif-dodaj`."
-    await interaction.response.send_message(embed=emb, ephemeral=True)
+    await interaction.response.send_message(embed=view.build_embed(), view=view if gifs else None, ephemeral=True)
 
 
 @bot.tree.command(name="gif-usun", description="Usuń GIF z listy po numerze (właściciel)")
@@ -2104,54 +2649,14 @@ async def cmd_gif_usun(interaction: discord.Interaction, numer: app_commands.Ran
 
 
 
-@bot.tree.command(name="panel", description="DM: panel kapitana – mecz, skład, API")
+@bot.tree.command(name="panel", description="Panel kapitana z przyciskami (też DM)")
 async def cmd_panel(interaction: discord.Interaction):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=interaction.guild is not None)
-    # API
-    api_ok, api_msg = True, "OK"
-    try:
-        await asyncio.to_thread(bot.api.get_pindolz_upcoming)
-    except Exception as e:
-        api_ok, api_msg = False, str(e)[:120]
-    try:
-        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
-    except Exception:
-        upcoming = []
-    nxt = bot._next_match(upcoming) if upcoming else None
-    emb = discord.Embed(title="📌 Panel kapitana", color=0x5865F2 if api_ok else 0xED4245)
-    emb.add_field(name="API", value=("✅ " + api_msg) if api_ok else ("❌ " + api_msg), inline=False)
-    main_ch = bot._main_channel_id()
-    live_ch = bot._live_channel_id()
-    table_ch = bot._table_channel_id()
-    emb.add_field(
-        name="Kanały",
-        value=(
-            f"Główny: {f'<#{main_ch}>' if main_ch else '—'}\n"
-            f"LIVE: {f'<#{live_ch}>' if live_ch else '—'}\n"
-            f"Tabela: {f'<#{table_ch}>' if table_ch else '—'}"
-        ),
-        inline=False,
-    )
-    if not nxt:
-        emb.add_field(name="Najbliższy mecz", value="Brak w terminarzu", inline=False)
-    else:
-        _, m = nxt
-        mid = int(m["id"])
-        opp = _match_opponent(m)
-        when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
-        roster, yes, no, pending = _lineup_status_lists(mid)
-        emb.add_field(
-            name="Najbliższy mecz",
-            value=f"**vs {opp}** · {when}\nSkład: {len(roster)} · ✅{len(yes)} · ❌{len(no)} · ⏳{len(pending)}",
-            inline=False,
-        )
-        emb.add_field(name="✅ Gram", value=", ".join(yes) or "—", inline=False)
-        emb.add_field(name="⏳ Bez odpowiedzi", value=", ".join(pending) or "—", inline=False)
-    emb.set_footer(text=f"Wersja {BOT_VERSION}")
-    await interaction.followup.send(embed=emb)
+    emb = await _build_captain_panel_embed()
+    await interaction.followup.send(embed=emb, view=CaptainPanelView(interaction.user.id))
 
 
 @bot.tree.command(name="sklad-status", description="DM: status potwierdzeń składu")
