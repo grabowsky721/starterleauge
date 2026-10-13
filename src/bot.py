@@ -98,6 +98,9 @@ COMMAND_START_ORDER = [
     "sklad-status",
     "ping-sklad",
     "moj-status",
+    "kapitan",
+    "vicekapitan",
+    "sztab",
 ]
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
@@ -515,8 +518,8 @@ class SkladPanelView(discord.ui.View):
         return ids
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Tylko właściciel może sterować składem.", ephemeral=True)
+        if not bot.is_staff(interaction):
+            await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
             return False
         return True
 
@@ -772,8 +775,8 @@ class PolaczPanelView(discord.ui.View):
         return emb
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Tylko właściciel.", ephemeral=True)
+        if not bot.is_staff(interaction):
+            await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
             return False
         return True
 
@@ -914,8 +917,8 @@ class CaptainPanelView(discord.ui.View):
         self.owner_id = owner_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Tylko właściciel.", ephemeral=True)
+        if not bot.is_staff(interaction):
+            await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
             return False
         return True
 
@@ -1258,15 +1261,34 @@ class PindolzBot(commands.Bot):
         print("[start] soft-start zakończony")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
-
         uid = interaction.user.id
         if interaction.guild:
             return uid == interaction.guild.owner_id
-        # DM: właściciel dowolnego wspólnego serwera
         for g in self.guilds:
             if g.owner_id == uid:
                 return True
         return False
+
+    def captain_id(self) -> int | None:
+        return db.get_config_int("captain_id")
+
+    def vice_captain_id(self) -> int | None:
+        return db.get_config_int("vice_captain_id")
+
+    def is_captain(self, interaction: discord.Interaction) -> bool:
+        """Właściciel serwera lub kapitan."""
+        if self.is_owner(interaction):
+            return True
+        cid = self.captain_id()
+        return bool(cid and interaction.user.id == cid)
+
+    def is_staff(self, interaction: discord.Interaction) -> bool:
+        """Właściciel, kapitan lub vicekapitan – zarządzanie składem itd."""
+        if self.is_owner(interaction):
+            return True
+        uid = interaction.user.id
+        cid, vid = self.captain_id(), self.vice_captain_id()
+        return uid in {x for x in (cid, vid) if x}
 
     def _owner_guild(self, user_id: int) -> discord.Guild | None:
         for g in self.guilds:
@@ -2511,8 +2533,8 @@ async def cmd_setup_ankiety(interaction: discord.Interaction, kanal: discord.Tex
 
 @bot.tree.command(name="ankieta-role", description="Panel ról do ankiet (interfejs; właściciel)")
 async def cmd_ankieta_role(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
         return
     if interaction.guild is None:
         await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
@@ -2551,8 +2573,8 @@ async def cmd_pokaz_embedy(interaction: discord.Interaction):
 
 @bot.tree.command(name="sklad", description="Panel składu na najbliższy mecz (interfejs; właściciel)")
 async def cmd_sklad(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
         return
     if interaction.guild is None:
         await interaction.response.send_message(
@@ -2585,8 +2607,8 @@ async def cmd_sklad(interaction: discord.Interaction):
 
 @bot.tree.command(name="polacz", description="Panel powiązań gracz ↔ nick (interfejs; właściciel)")
 async def cmd_polacz(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
         return
     if interaction.guild is None:
         await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
@@ -2651,8 +2673,8 @@ async def cmd_gif_usun(interaction: discord.Interaction, numer: app_commands.Ran
 
 @bot.tree.command(name="panel", description="Panel kapitana z przyciskami (też DM)")
 async def cmd_panel(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=interaction.guild is not None)
     emb = await _build_captain_panel_embed()
@@ -2661,8 +2683,8 @@ async def cmd_panel(interaction: discord.Interaction):
 
 @bot.tree.command(name="sklad-status", description="DM: status potwierdzeń składu")
 async def cmd_sklad_status(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=interaction.guild is not None)
     try:
@@ -2681,8 +2703,8 @@ async def cmd_sklad_status(interaction: discord.Interaction):
 
 @bot.tree.command(name="ping-sklad", description="DM: ponów prośbę o potwierdzenie do osób bez odpowiedzi")
 async def cmd_ping_sklad(interaction: discord.Interaction):
-    if not bot.is_owner(interaction):
-        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=interaction.guild is not None)
     try:
@@ -2774,6 +2796,62 @@ async def cmd_moj_status(interaction: discord.Interaction):
         f"Jesteś w składzie.\n"
         f"Twoja odpowiedź: {ans}"
     )
+
+
+
+@bot.tree.command(name="kapitan", description="Ustaw lub usuń kapitana (tylko właściciel serwera)")
+@app_commands.describe(osoba="Kapitan (puste = usuń)")
+async def cmd_kapitan(interaction: discord.Interaction, osoba: Optional[discord.Member] = None):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może ustawić kapitana.", ephemeral=True)
+        return
+    if osoba is None:
+        db.set_config("captain_id", None)
+        await interaction.response.send_message("Kapitan **usunięty**.", ephemeral=True)
+        return
+    if osoba.bot:
+        await interaction.response.send_message("Bot nie może być kapitanem.", ephemeral=True)
+        return
+    db.set_config("captain_id", str(osoba.id))
+    # vice nie może być tym samym
+    if bot.vice_captain_id() == osoba.id:
+        db.set_config("vice_captain_id", None)
+    await interaction.response.send_message(f"Kapitan: **{osoba.mention}**", ephemeral=True)
+
+
+@bot.tree.command(name="vicekapitan", description="Ustaw lub usuń vicekapitana (właściciel lub kapitan)")
+@app_commands.describe(osoba="Vicekapitan (puste = usuń)")
+async def cmd_vicekapitan(interaction: discord.Interaction, osoba: Optional[discord.Member] = None):
+    if not bot.is_captain(interaction):
+        await interaction.response.send_message("Tylko właściciel lub kapitan może ustawić vicekapitana.", ephemeral=True)
+        return
+    if osoba is None:
+        db.set_config("vice_captain_id", None)
+        await interaction.response.send_message("Vicekapitan **usunięty**.", ephemeral=True)
+        return
+    if osoba.bot:
+        await interaction.response.send_message("Bot nie może być vicekapitanem.", ephemeral=True)
+        return
+    if bot.captain_id() == osoba.id:
+        await interaction.response.send_message("Ta osoba jest już kapitanem. Najpierw zmień kapitana.", ephemeral=True)
+        return
+    db.set_config("vice_captain_id", str(osoba.id))
+    await interaction.response.send_message(f"Vicekapitan: **{osoba.mention}**", ephemeral=True)
+
+
+@bot.tree.command(name="sztab", description="Pokaż kapitana i vicekapitana")
+async def cmd_sztab(interaction: discord.Interaction):
+    cid, vid = bot.captain_id(), bot.vice_captain_id()
+    emb = discord.Embed(title="👔 Sztab drużyny", color=0x5865F2)
+    emb.add_field(name="Kapitan", value=f"<@{cid}>" if cid else "_nie ustawiono_", inline=True)
+    emb.add_field(name="Vicekapitan", value=f"<@{vid}>" if vid else "_nie ustawiono_", inline=True)
+    emb.add_field(
+        name="Uprawnienia sztabu",
+        value="`/sklad` · `/panel` · `/polacz` · `/ping-sklad` · `/sklad-status` · `/ankieta-role`",
+        inline=False,
+    )
+    emb.set_footer(text="Kapitana ustawia właściciel: /kapitan · Vice: /vicekapitan")
+    await interaction.response.send_message(embed=emb, ephemeral=True)
 
 
 
