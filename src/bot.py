@@ -64,6 +64,7 @@ START_DELAY_POLL = 120
 START_DELAY_API = 140
 START_DELAY_EVENT = 160
 START_DELAY_COMMANDS = 180
+START_DELAY_COMMANDS_SYNC = 60
 START_DELAY_UPDATE = 200
 START_DELAY_WEEKLY = 220
 
@@ -432,13 +433,9 @@ class PindolzBot(commands.Bot):
             self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
-        # Komendy slash – od razu przy starcie (nie czekają na soft-start)
-        try:
-            synced = await self.tree.sync()
-            print(f"[sync] global: {len(synced)} komend -> {[c.name for c in synced]}")
-        except Exception as e:
-            print(f"[sync] global blad: {e}")
+        # Komendy slash – sync po START_DELAY_COMMANDS_SYNC sekundach od ready
         asyncio.create_task(self._soft_start_tasks())
+        asyncio.create_task(self._sync_commands_after_delay())
 
 
     BOOT_LABELS = (
@@ -738,6 +735,43 @@ class PindolzBot(commands.Bot):
                 print(f"[sklad-dm-owner] {e}")
         print(f"[sklad] confirm mid={mid} uid={uid} ans={ans}")
 
+
+
+    async def _sync_commands_after_delay(self):
+        """Rejestruje slash-komendy po ustalonym opóźnieniu od startu."""
+        await self.wait_until_ready()
+        delay = globals().get("START_DELAY_COMMANDS_SYNC", 60)
+        print(f"[sync] komendy za {delay}s…")
+        try:
+            msg = getattr(self, "_boot_msg", None)
+            if msg:
+                emb = self._boot_progress_embed(set(), current="commands")
+                emb.title = f"🚀 Start bota · komendy za {delay}s"
+                emb.description = f"Wersja **`{BOT_VERSION}`** · rejestracja komend za **{delay} s**"
+                await msg.edit(embed=emb)
+        except Exception:
+            pass
+        await asyncio.sleep(delay)
+        try:
+            for guild in self.guilds:
+                try:
+                    synced = await self.tree.sync(guild=guild)
+                    print(f"[sync] {guild.name}: {len(synced)} komend")
+                except Exception as e:
+                    print(f"[sync] guild {guild.id}: {e}")
+            synced = await self.tree.sync()
+            print(f"[sync] global: {len(synced)} komend -> {[c.name for c in synced]}")
+        except Exception as e:
+            print(f"[sync] blad: {e}")
+        try:
+            msg = getattr(self, "_boot_msg", None)
+            if msg:
+                emb = self._boot_progress_embed(set(), current=None)
+                emb.title = "✅ Komendy zarejestrowane"
+                emb.description = f"Wersja **`{BOT_VERSION}`** · slash-komendy aktywne"
+                await msg.edit(embed=emb)
+        except Exception:
+            pass
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         uid = interaction.user.id
@@ -2399,16 +2433,7 @@ async def on_ready():
         embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
     except Exception:
         pass
-    print("Bot gotowy – komendy zsynchronizowane, taski według soft-startu.")
-    try:
-        for guild in bot.guilds:
-            try:
-                synced = await bot.tree.sync(guild=guild)
-                print(f"[sync] {guild.name}: {len(synced)} komend")
-            except Exception as e:
-                print(f"[sync] guild {guild.id}: {e}")
-    except Exception as e:
-        print(f"[sync] on_ready: {e}")
+    print("Bot gotowy – komendy za 60 s, taski według soft-startu.")
     if bot._announced:
         return
     bot._announced = True
