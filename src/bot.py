@@ -1466,17 +1466,21 @@ class PindolzBot(commands.Bot):
                 cmd_done.append(name)
                 print(f"[start] komenda /{name} ({idx}/{total})")
 
-            for guild in self.guilds:
-                try:
-                    synced = await self.tree.sync(guild=guild)
-                    print(f"[sync] {guild.name}: {len(synced)} komend")
-                except Exception as e:
-                    print(f"[sync] guild {guild.id}: {e}")
+            # Najpierw global, potem kopia na każdy serwer – komendy widać od razu
             try:
                 synced = await self.tree.sync()
-                print(f"[sync] global: {len(synced)} komend -> {[c.name for c in synced]}")
+                names = [c.name for c in synced]
+                print(f"[sync] global: {len(synced)} komend -> {names}")
             except Exception as e:
                 print(f"[sync] global blad: {e}")
+                names = []
+            for guild in self.guilds:
+                try:
+                    self.tree.copy_global_to(guild=guild)
+                    synced = await self.tree.sync(guild=guild)
+                    print(f"[sync] {guild.name}: {len(synced)} komend (guild)")
+                except Exception as e:
+                    print(f"[sync] guild {guild.id}: {e}")
 
         async def start_table():
             if not self.table_update.is_running():
