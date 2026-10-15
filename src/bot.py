@@ -1960,9 +1960,6 @@ class PindolzBot(commands.Bot):
                 await self._finish_event(mid)
                 db.mark_finished(mid)
 
-    @tasks.loop(time=time(20, 0, tzinfo=TZ))
-    @guarded
-
     async def _start_mvp_vote(self, channel, match: dict):
         """Po meczu: głosowanie MVP – do 5 osób ze składu / powiązań."""
         mid = match.get("id")
@@ -2135,6 +2132,8 @@ class PindolzBot(commands.Bot):
             except Exception as e:
                 print(f"[zaplanuj] #{sid}: {e}")
 
+    @tasks.loop(time=time(20, 0, tzinfo=TZ))
+    @guarded
     async def weekly_summary(self):
         if datetime.now(TZ).weekday() != 6:
             return
