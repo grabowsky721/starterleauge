@@ -1,9 +1,11 @@
 import asyncio
+import functools
 import json
 import os
 import random
 import requests
 import sys
+import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -199,6 +201,39 @@ def _win_gifs() -> list[str]:
         return [str(x) for x in json.loads(db.get_config("win_gifs") or "[]")]
     except Exception:
         return []
+
+
+LOOP_NAMES = (
+    "table_update", "daily_check", "prematch_check", "live_check", "weekly_summary", "status_loop",
+    "poll_check", "event_check", "update_check", "api_watch", "cleanup_task",
+)
+
+# Klucze konfiguracji tworzone osobno dla każdego meczu (sprzątane po 60 dniach bez zmian)
+PER_MATCH_CONFIG_PREFIXES = (
+    "lineup_confirm_", "lineup_", "poll_votes_", "poll_info_", "poll_msg_", "event_",
+    "remind_sent_", "remind_", "live_thread_", "gg_", "prematch60_", "prematch_",
+)
+
+
+def guarded(fn):
+    """Osłona pętli tasks.loop: wyjątek w jednym przebiegu nie zabija całej pętli."""
+    @functools.wraps(fn)
+    async def wrapper(self, *args, **kwargs):
+        try:
+            return await fn(self, *args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[{fn.__name__}] nieobsłużony błąd (pętla działa dalej): {type(e).__name__}: {e}")
+            traceback.print_exc()
+            await self._report_loop_error(fn.__name__, e)
+    return wrapper
+
+
+def _when_text(m: dict) -> str:
+    """Termin meczu jako znacznik czasu Discorda (API zwraca matchDate/matchTime)."""
+    dt = embeds._match_dt(m) if (m.get("matchDate") and m.get("matchTime")) else None
+    return f"<t:{int(dt.timestamp())}:F>" if dt else "?"
 
 
 def settings_embed() -> discord.Embed:
@@ -546,7 +581,7 @@ def sklad_confirm_view(mid: int) -> discord.ui.View:
 def _sklad_preview_embed(m: dict, mid: int, selected_ids: list[int]) -> discord.Embed:
     """Embed panelu składu (interfejs)."""
     opp = _match_opponent(m)
-    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    when = _when_text(m)
     nicks = _player_nicks()
     presets = _lineup_presets()
     preset_info = f" · zapisane składy: **{len(presets)}**" if presets else ""
@@ -588,7 +623,7 @@ def _sklad_preview_embed(m: dict, mid: int, selected_ids: list[int]) -> discord.
 async def _sklad_send_confirmation_dms(m: dict, mid: int, ids: list[int]) -> tuple[list[str], list[str]]:
     """Wyślij DM z prośbą o potwierdzenie. Zwraca (ok_mentions, fail_mentions)."""
     opp = _match_opponent(m)
-    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    when = _when_text(m)
     dm_ok, dm_fail = [], []
     for uid in ids:
         user = bot.get_user(uid)
@@ -868,7 +903,7 @@ class SetupPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         note = ""
         try:
-            table = bot.api.get_division6_table()
+            table = (await asyncio.to_thread(bot.api.get_division6_table))
             if table and interaction.guild:
                 ch = interaction.guild.get_channel(self.table_id)
                 if ch:
@@ -1145,7 +1180,7 @@ async def _build_captain_panel_embed() -> discord.Embed:
     else:
         _, m = nxt
         mid = int(m["id"])
-        opp, when = _match_opponent(m), f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+        opp, when = _match_opponent(m), _when_text(m)
         roster, yes, no, pending = _lineup_status_lists(mid)
         emb.add_field(name="Najbliższy mecz", value=f"**vs {opp}** · {when}\nSkład: {len(roster)} · ✅{len(yes)} · ❌{len(no)} · ⏳{len(pending)}", inline=False)
     emb.set_footer(text=f"Wersja {BOT_VERSION}")
@@ -1185,7 +1220,7 @@ def _lineup_status_lists(mid: int) -> tuple[list[int], list[str], list[str], lis
 def _lineup_status_embed(m: dict, mid: int) -> discord.Embed:
     roster, yes, no, pending = _lineup_status_lists(mid)
     opp = _match_opponent(m)
-    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    when = _when_text(m)
     emb = discord.Embed(
         title="📋 Status składu",
         description=f"**vs {opp}** · {when}\nMecz `#{mid}`",
@@ -1430,6 +1465,8 @@ class PindolzBot(commands.Bot):
         await run_step("update", START_DELAY_UPDATE - START_DELAY_CLEANUP, start_update)
         await run_step("weekly", START_DELAY_WEEKLY - START_DELAY_UPDATE, start_weekly)
 
+        if not self.loop_watchdog.is_running():
+            self.loop_watchdog.start()
         print("[start] soft-start zakończony")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
@@ -1555,6 +1592,7 @@ class PindolzBot(commands.Bot):
             print(f"[react] {e}")
 
     @tasks.loop(time=TABLE_UPDATE_TIMES)
+    @guarded
     async def table_update(self):
         await self._run_table_update()
 
@@ -1597,6 +1635,7 @@ class PindolzBot(commands.Bot):
         print(f"[table] zaktualizowano o {datetime.now(TZ).strftime('%H:%M')}")
 
     @tasks.loop(minutes=10)
+    @guarded
     async def daily_check(self):
         await self._run_daily_check()
 
@@ -1618,7 +1657,7 @@ class PindolzBot(commands.Bot):
         form = self.api.get_form(history, limit=5)
         standing = None
         try:
-            standing = self.api.get_pindolz_standing()
+            standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
         except Exception:
             pass
         cutoff = now - timedelta(days=14)
@@ -1696,6 +1735,7 @@ class PindolzBot(commands.Bot):
         return data
 
     @tasks.loop(minutes=1)
+    @guarded
     async def prematch_check(self):
         channel = await self.get_channel_safe(self._main_channel_id())
         try:
@@ -1726,7 +1766,7 @@ class PindolzBot(commands.Bot):
             except Exception:
                 pass
             try:
-                table = self.api.get_division6_table()
+                table = (await asyncio.to_thread(self.api.get_division6_table))
                 opp_name = self._opponent(m).upper()
                 for row in table:
                     name = ((row.get("team") or {}).get("name") or "").upper()
@@ -1751,6 +1791,7 @@ class PindolzBot(commands.Bot):
         await self.wait_until_ready()
 
     @tasks.loop(seconds=LIVE_INTERVAL_IDLE)
+    @guarded
     async def live_check(self):
         await self._run_live_check()
 
@@ -1824,7 +1865,7 @@ class PindolzBot(commands.Bot):
                 form = self.api.get_form(history, limit=5) if history else None
                 standing = None
                 try:
-                    standing = self.api.get_pindolz_standing()
+                    standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
                 except Exception:
                     pass
                 score = match_data.get("score") or {}
@@ -1845,6 +1886,7 @@ class PindolzBot(commands.Bot):
                 db.mark_finished(mid)
 
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
+    @guarded
     async def weekly_summary(self):
         if datetime.now(TZ).weekday() != 6:
             return
@@ -1852,7 +1894,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            history = self.api.get_pindolz_history()
+            history = (await asyncio.to_thread(self.api.get_pindolz_history))
         except Exception as e:
             print(f"[weekly] API error: {e}")
             return
@@ -1877,7 +1919,7 @@ class PindolzBot(commands.Bot):
                 losses += 1
         standing = None
         try:
-            standing = self.api.get_pindolz_standing()
+            standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
         except Exception:
             pass
         await channel.send(embed=embeds.weekly_summary_embed(week_matches, wins, losses, standing))
@@ -2000,6 +2042,7 @@ class PindolzBot(commands.Bot):
         return [s[:128] for s in statuses], False
 
     @tasks.loop(seconds=30)
+    @guarded
     async def status_loop(self):
         if not feature_on("status"):
             if self._status_current is not None:
@@ -2114,6 +2157,7 @@ class PindolzBot(commands.Bot):
         await interaction.response.edit_message(embed=embeds.poll_embed(info, votes))
 
     @tasks.loop(minutes=5)
+    @guarded
     async def poll_check(self):
         if not feature_on("polls"):
             return
@@ -2215,6 +2259,7 @@ class PindolzBot(commands.Bot):
 
     # ---------- WYDARZENIE SERWERA DISCORD ----------
     @tasks.loop(minutes=5)
+    @guarded
     async def event_check(self):
         if not feature_on("events"):
             return
@@ -2367,6 +2412,7 @@ class PindolzBot(commands.Bot):
         return r.text.strip()
 
     @tasks.loop(hours=1)
+    @guarded
     async def update_check(self):
         if not feature_on("updates"):
             return
@@ -2392,6 +2438,36 @@ class PindolzBot(commands.Bot):
         await self.wait_until_ready()
 
     # ---------- ALERT O AWARII API ----------
+    async def _report_loop_error(self, name: str, err: Exception):
+        """DM do właściciela o błędzie w zadaniu w tle (max raz na 30 min dla danego zadania)."""
+        last = self.__dict__.setdefault("_loop_err_last", {})
+        now = datetime.now(TZ).timestamp()
+        if now - last.get(name, 0) < 1800:
+            return
+        last[name] = now
+        await self._dm_owner(
+            f"⚠️ Zadanie w tle **{name}** zgłosiło błąd: `{type(err).__name__}: {str(err)[:300]}`\n"
+            "Bot działa dalej. Jeśli to się powtarza, sprawdź uprawnienia bota na kanałach i log serwera."
+        )
+
+    @tasks.loop(minutes=2)
+    @guarded
+    async def loop_watchdog(self):
+        """Wznawia zadania w tle, które mimo osłony się zatrzymały."""
+        for name in LOOP_NAMES:
+            lp = getattr(self, name, None)
+            if lp is not None and lp.failed():
+                print(f"[watchdog] zadanie {name} się zatrzymało, restartuję")
+                try:
+                    lp.restart()
+                except Exception as e:
+                    print(f"[watchdog] nie udało się zrestartować {name}: {e}")
+                await self._report_loop_error(name, RuntimeError("zadanie zatrzymało się i zostało wznowione przez watchdog"))
+
+    @loop_watchdog.before_loop
+    async def before_loop_watchdog(self):
+        await self.wait_until_ready()
+
     async def _dm_owner(self, text: str):
         try:
             info = await self.application_info()
@@ -2412,6 +2488,7 @@ class PindolzBot(commands.Bot):
         return f"🚨 **API StarterLeague nie odpowiada od ok. 3 minut.**\n`{str(err)[:300]}`"
 
     @tasks.loop(seconds=60)
+    @guarded
     async def api_watch(self):
         if not feature_on("alerts"):
             return
@@ -2434,11 +2511,15 @@ class PindolzBot(commands.Bot):
         await self.wait_until_ready()
 
     @tasks.loop(time=time(4, 0, tzinfo=TZ))
+    @guarded
     async def cleanup_task(self):
         try:
             n = db.cleanup_old(30)
             if n:
                 print(f"[cleanup] usunięto {n} starych rekordów")
+            c = db.cleanup_config(PER_MATCH_CONFIG_PREFIXES, 60)
+            if c:
+                print(f"[cleanup] usunięto {c} nieaktualnych kluczy konfiguracji")
         except Exception as e:
             print(f"[cleanup] error: {e}")
 
@@ -2454,8 +2535,8 @@ bot = PindolzBot()
 async def cmd_pindolz(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
-        upcoming = bot.api.get_pindolz_upcoming()
-        history = bot.api.get_pindolz_history()
+        upcoming = (await asyncio.to_thread(bot.api.get_pindolz_upcoming))
+        history = (await asyncio.to_thread(bot.api.get_pindolz_history))
     except Exception as e:
         await interaction.followup.send(f"Błąd API: {e}")
         return
@@ -2466,7 +2547,7 @@ async def cmd_pindolz(interaction: discord.Interaction):
 async def cmd_live(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
-        lives = bot.api.get_pindolz_live()
+        lives = (await asyncio.to_thread(bot.api.get_pindolz_live))
     except Exception as e:
         await interaction.followup.send(f"Błąd API: {e}")
         return
@@ -2480,7 +2561,7 @@ async def cmd_live(interaction: discord.Interaction):
 async def cmd_wyniki(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
-        history = bot.api.get_pindolz_history()
+        history = (await asyncio.to_thread(bot.api.get_pindolz_history))
     except Exception as e:
         await interaction.followup.send(f"Błąd API: {e}")
         return
@@ -2491,7 +2572,7 @@ async def cmd_wyniki(interaction: discord.Interaction):
 async def cmd_nadchodzace(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
-        upcoming = bot.api.get_pindolz_upcoming()
+        upcoming = (await asyncio.to_thread(bot.api.get_pindolz_upcoming))
     except Exception as e:
         await interaction.followup.send(f"Błąd API: {e}")
         return
@@ -2502,7 +2583,7 @@ async def cmd_nadchodzace(interaction: discord.Interaction):
 async def cmd_tabela(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
-        table = bot.api.get_division6_table()
+        table = (await asyncio.to_thread(bot.api.get_division6_table))
     except Exception as e:
         await interaction.followup.send(f"Błąd API: {e}")
         return
@@ -2623,7 +2704,7 @@ async def cmd_setup_tabela(interaction: discord.Interaction, kanal: discord.Text
     db.set_config("table_channel_id", str(kanal.id))
     await interaction.response.defer(ephemeral=True)
     try:
-        table = bot.api.get_division6_table()
+        table = (await asyncio.to_thread(bot.api.get_division6_table))
         if table:
             emb = embeds.standings_embed(table, changes=bot._rank_changes(table))
             msg = await kanal.send(embed=emb, view=refresh_view("tabela"))
@@ -2898,7 +2979,7 @@ async def cmd_ping_sklad(interaction: discord.Interaction):
     data = _lineup_confirms(mid)
     pending_ids = [pid for pid in roster if data.get(str(pid)) not in ("yes", "no")]
     opp = _match_opponent(m)
-    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    when = _when_text(m)
     ok, fail = [], []
     for pid in pending_ids:
         user = bot.get_user(pid)
@@ -2950,7 +3031,7 @@ async def cmd_moj_status(interaction: discord.Interaction):
         roster = []
     uid = interaction.user.id
     opp = _match_opponent(m)
-    when = f"{m.get('date') or '?'} {m.get('time') or ''}".strip()
+    when = _when_text(m)
     if uid not in roster:
         await interaction.followup.send(
             f"Nie jesteś w składzie na najbliższy mecz (**vs {opp}**, {when})."
