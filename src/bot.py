@@ -106,6 +106,8 @@ COMMAND_START_ORDER = [
     "sztab",
     "trening",
     "zaplanuj",
+    "zaplanuj-lista",
+    "coach",
 ]
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
@@ -764,7 +766,7 @@ class SkladPanelView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not bot.is_staff(interaction):
-            await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
+            await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
             return False
         return True
 
@@ -1021,7 +1023,7 @@ class PolaczPanelView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not bot.is_staff(interaction):
-            await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
+            await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
             return False
         return True
 
@@ -1163,7 +1165,7 @@ class CaptainPanelView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not bot.is_staff(interaction):
-            await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
+            await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
             return False
         return True
 
@@ -1549,6 +1551,9 @@ class PindolzBot(commands.Bot):
     def vice_captain_id(self) -> int | None:
         return db.get_config_int("vice_captain_id")
 
+    def coach_id(self) -> int | None:
+        return db.get_config_int("coach_id")
+
     def is_captain(self, interaction: discord.Interaction) -> bool:
         """Właściciel serwera lub kapitan."""
         if self.is_owner(interaction):
@@ -1557,12 +1562,11 @@ class PindolzBot(commands.Bot):
         return bool(cid and interaction.user.id == cid)
 
     def is_staff(self, interaction: discord.Interaction) -> bool:
-        """Właściciel, kapitan lub vicekapitan – zarządzanie składem itd."""
+        """Właściciel, kapitan, vicekapitan lub coach."""
         if self.is_owner(interaction):
             return True
         uid = interaction.user.id
-        cid, vid = self.captain_id(), self.vice_captain_id()
-        return uid in {x for x in (cid, vid) if x}
+        return uid in {x for x in (self.captain_id(), self.vice_captain_id(), self.coach_id()) if x}
 
     def _owner_guild(self, user_id: int) -> discord.Guild | None:
         for g in self.guilds:
@@ -2119,18 +2123,25 @@ class PindolzBot(commands.Bot):
             if when > now:
                 continue
             ch_id = data.get("channel_id")
-            content = data.get("content") or ""
-            try:
-                ch = await self.get_channel_safe(int(ch_id)) if ch_id else None
-                if ch and content:
-                    ping = data.get("ping") or ""
-                    text = f"{ping} {content}".strip() if ping else content
-                    await ch.send(text[:2000])
+            content = (data.get("content") or "").strip()
+            if not ch_id or not content:
                 data["sent"] = True
                 _save_sched(sid, data)
-                print(f"[zaplanuj] wysłano #{sid}")
+                continue
+            try:
+                ch = await self.get_channel_safe(int(ch_id))
+                if not ch:
+                    print(f"[zaplanuj] #{sid}: brak kanału {ch_id}")
+                    continue
+                ping = (data.get("ping") or "").strip()
+                text = f"{ping} {content}".strip() if ping else content
+                await ch.send(text[:2000])
+                data["sent"] = True
+                _save_sched(sid, data)
+                print(f"[zaplanuj] wysłano #{sid} → {ch_id}")
             except Exception as e:
                 print(f"[zaplanuj] #{sid}: {e}")
+
 
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
     @guarded
@@ -3061,7 +3072,7 @@ async def cmd_setup_ankiety(interaction: discord.Interaction, kanal: discord.Tex
 @bot.tree.command(name="ankieta-role", description="Panel ról do ankiet (interfejs; właściciel)")
 async def cmd_ankieta_role(interaction: discord.Interaction):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
+        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
         return
     if interaction.guild is None:
         await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
@@ -3101,7 +3112,7 @@ async def cmd_pokaz_embedy(interaction: discord.Interaction):
 @bot.tree.command(name="sklad", description="Panel składu na najbliższy mecz (interfejs; właściciel)")
 async def cmd_sklad(interaction: discord.Interaction):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
+        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
         return
     if interaction.guild is None:
         await interaction.response.send_message(
@@ -3135,7 +3146,7 @@ async def cmd_sklad(interaction: discord.Interaction):
 @bot.tree.command(name="polacz", description="Panel powiązań gracz ↔ nick (interfejs; właściciel)")
 async def cmd_polacz(interaction: discord.Interaction):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
+        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
         return
     if interaction.guild is None:
         await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
@@ -3201,7 +3212,7 @@ async def cmd_gif_usun(interaction: discord.Interaction, numer: app_commands.Ran
 @bot.tree.command(name="panel", description="Panel kapitana z przyciskami (też DM)")
 async def cmd_panel(interaction: discord.Interaction):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
+        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=interaction.guild is not None)
     emb = await _build_captain_panel_embed()
@@ -3211,7 +3222,7 @@ async def cmd_panel(interaction: discord.Interaction):
 @bot.tree.command(name="sklad-status", description="DM: status potwierdzeń składu")
 async def cmd_sklad_status(interaction: discord.Interaction):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
+        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=interaction.guild is not None)
     try:
@@ -3231,7 +3242,7 @@ async def cmd_sklad_status(interaction: discord.Interaction):
 @bot.tree.command(name="ping-sklad", description="DM: ponów prośbę o potwierdzenie do osób bez odpowiedzi")
 async def cmd_ping_sklad(interaction: discord.Interaction):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan może to użyć.", ephemeral=True)
+        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=interaction.guild is not None)
     try:
@@ -3366,18 +3377,19 @@ async def cmd_vicekapitan(interaction: discord.Interaction, osoba: Optional[disc
     await interaction.response.send_message(f"Vicekapitan: **{osoba.mention}**", ephemeral=True)
 
 
-@bot.tree.command(name="sztab", description="Pokaż kapitana i vicekapitana")
+@bot.tree.command(name="sztab", description="Pokaż kapitana, vicekapitana i coacha")
 async def cmd_sztab(interaction: discord.Interaction):
-    cid, vid = bot.captain_id(), bot.vice_captain_id()
+    cid, vid, coach = bot.captain_id(), bot.vice_captain_id(), bot.coach_id()
     emb = discord.Embed(title="👔 Sztab drużyny", color=0x5865F2)
     emb.add_field(name="Kapitan", value=f"<@{cid}>" if cid else "_nie ustawiono_", inline=True)
     emb.add_field(name="Vicekapitan", value=f"<@{vid}>" if vid else "_nie ustawiono_", inline=True)
+    emb.add_field(name="Coach", value=f"<@{coach}>" if coach else "_nie ustawiono_", inline=True)
     emb.add_field(
         name="Uprawnienia sztabu",
-        value="`/sklad` · `/panel` · `/polacz` · `/ping-sklad` · `/sklad-status` · `/ankieta-role`",
+        value="`/sklad` · `/panel` · `/polacz` · `/ping-sklad` · `/sklad-status` · `/ankieta-role` · `/trening` · `/zaplanuj`",
         inline=False,
     )
-    emb.set_footer(text="Kapitana ustawia właściciel: /kapitan · Vice: /vicekapitan")
+    emb.set_footer(text="/kapitan · /vicekapitan · /coach")
     await interaction.response.send_message(embed=emb, ephemeral=True)
 
 
@@ -3401,7 +3413,7 @@ async def cmd_trening(
     pytanie: Optional[str] = None,
 ):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
+        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
         return
     if interaction.guild is None:
         await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
@@ -3457,11 +3469,11 @@ async def cmd_trening(
 
 @bot.tree.command(name="zaplanuj", description="Zaplanuj wiadomość na kanał (sztab)")
 @app_commands.describe(
-    data="Data YYYY-MM-DD",
-    godzina="Godzina HH:MM (Europe/Warsaw)",
+    data="Data YYYY-MM-DD (np. 2026-10-20)",
+    godzina="Godzina HH:MM (np. 18:30)",
     tresc="Treść wiadomości",
     kanal="Kanał (domyślnie bieżący)",
-    ping_roli="Opcjonalnie rola do wspomnia",
+    ping_roli="Opcjonalnie rola do wspomnienia",
 )
 async def cmd_zaplanuj(
     interaction: discord.Interaction,
@@ -3472,38 +3484,116 @@ async def cmd_zaplanuj(
     ping_roli: Optional[discord.Role] = None,
 ):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
+        await interaction.response.send_message(
+            "Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True
+        )
         return
     if interaction.guild is None:
         await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
         return
+    data_s = data.strip().replace(".", "-").replace("/", "-")
+    godzina_s = godzina.strip().replace(".", ":")
     try:
-        dt = datetime.strptime(f"{data.strip()} {godzina.strip()}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+        parts = godzina_s.split(":")
+        if len(parts) >= 2:
+            godzina_s = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+        dt = datetime.strptime(f"{data_s} {godzina_s}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
     except ValueError:
-        await interaction.response.send_message("Zły format. Data: `YYYY-MM-DD`, godzina: `HH:MM`.", ephemeral=True)
-        return
+        try:
+            dt = datetime.strptime(f"{data_s} {godzina_s}", "%d-%m-%Y %H:%M").replace(tzinfo=TZ)
+        except ValueError:
+            await interaction.response.send_message(
+                "Zły format. Data: `YYYY-MM-DD`, godzina: `HH:MM` (np. `2026-10-20` i `18:30`).",
+                ephemeral=True,
+            )
+            return
     if dt.timestamp() < datetime.now(TZ).timestamp() - 30:
         await interaction.response.send_message("Termin jest w przeszłości.", ephemeral=True)
         return
-    ch = kanal or interaction.channel
-    if not isinstance(ch, discord.TextChannel):
-        await interaction.response.send_message("Wybierz kanał tekstowy.", ephemeral=True)
+    ch = kanal if kanal is not None else interaction.channel
+    if ch is None or not hasattr(ch, "id"):
+        await interaction.response.send_message("Wybierz kanał tekstowy (`kanal:`).", ephemeral=True)
         return
-    sid = _next_sched_id()
-    payload = {
-        "id": sid,
-        "when": int(dt.timestamp()),
-        "channel_id": ch.id,
-        "content": tresc.strip()[:1900],
-        "ping": ping_roli.mention if ping_roli else "",
-        "sent": False,
-        "by": interaction.user.id,
-    }
-    _save_sched(sid, payload)
-    await interaction.response.send_message(
-        f"✅ Zaplanowano **#{sid}** na {ch.mention} · <t:{int(dt.timestamp())}:F> (<t:{int(dt.timestamp())}:R>)",
-        ephemeral=True,
-    )
+    content = (tresc or "").strip()[:1900]
+    if not content:
+        await interaction.response.send_message("Treść nie może być pusta.", ephemeral=True)
+        return
+    try:
+        sid = _next_sched_id()
+        payload = {
+            "id": sid,
+            "when": int(dt.timestamp()),
+            "channel_id": int(ch.id),
+            "content": content,
+            "ping": ping_roli.mention if ping_roli else "",
+            "sent": False,
+            "by": interaction.user.id,
+        }
+        _save_sched(sid, payload)
+        if not _load_sched(sid):
+            await interaction.response.send_message("Błąd zapisu do bazy.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"✅ Zaplanowano **#{sid}** na <#{ch.id}>\n"
+            f"⏰ <t:{int(dt.timestamp())}:F> · <t:{int(dt.timestamp())}:R>\n"
+            f"Wysyłka automatyczna (co 30 s).",
+            ephemeral=True,
+        )
+        print(f"[zaplanuj] #{sid} when={payload['when']} ch={ch.id}")
+    except Exception as e:
+        print(f"[zaplanuj] błąd: {e}")
+        if interaction.response.is_done():
+            await interaction.followup.send(f"Błąd: {e}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Błąd: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="zaplanuj-lista", description="Lista zaplanowanych wiadomości (sztab)")
+async def cmd_zaplanuj_lista(interaction: discord.Interaction):
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko sztab.", ephemeral=True)
+        return
+    try:
+        seq = int(db.get_config("sched_msg_seq") or "1")
+    except Exception:
+        seq = 1
+    lines = []
+    now = int(datetime.now(TZ).timestamp())
+    for sid in range(max(1, seq - 50), seq):
+        data = _load_sched(sid)
+        if not data:
+            continue
+        when = int(data.get("when") or 0)
+        if data.get("sent"):
+            status = "✅ wysłano"
+        elif when > now:
+            status = "⏳ czeka"
+        else:
+            status = "🔄 do wysłania"
+        preview = (data.get("content") or "")[:40].replace("\n", " ")
+        lines.append(f"**#{sid}** {status} · <t:{when}:f> · <#{data.get('channel_id')}> · {preview}")
+    if not lines:
+        await interaction.response.send_message("Brak zaplanowanych wiadomości.", ephemeral=True)
+        return
+    emb = discord.Embed(title="📋 Zaplanowane wiadomości", description="\n".join(lines[-25:]), color=0x5865F2)
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+@bot.tree.command(name="coach", description="Ustaw lub usuń coacha (właściciel lub kapitan)")
+@app_commands.describe(osoba="Coach (puste = usuń)")
+async def cmd_coach(interaction: discord.Interaction, osoba: Optional[discord.Member] = None):
+    if not bot.is_captain(interaction):
+        await interaction.response.send_message("Tylko właściciel lub kapitan może ustawić coacha.", ephemeral=True)
+        return
+    if osoba is None:
+        db.set_config("coach_id", None)
+        await interaction.response.send_message("Coach **usunięty**.", ephemeral=True)
+        return
+    if osoba.bot:
+        await interaction.response.send_message("Bot nie może być coachem.", ephemeral=True)
+        return
+    db.set_config("coach_id", str(osoba.id))
+    await interaction.response.send_message(f"Coach: **{osoba.mention}**", ephemeral=True)
 
 
 
