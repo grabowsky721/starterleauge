@@ -80,6 +80,7 @@ COMMAND_START_ORDER = [
     "setup-live",
     "setup-tabela",
     "setup-ankiety",
+    "setup-ogloszenia",
     "setup-all",
     "status",
     "wersja",
@@ -105,6 +106,7 @@ COMMAND_START_ORDER = [
     "vicekapitan",
     "sztab",
     "trening",
+    "ogloszenie",
     "zaplanuj",
     "zaplanuj-lista",
     "coach",
@@ -415,7 +417,22 @@ class PollButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_p
 
 
 
-# ---------- Ankieta treningu ----------
+
+# ---------- Ankieta treningu (dni → godziny → wydarzenie) ----------
+WEEKDAYS_PL = [
+    ("poniedzialek", "Poniedziałek"),
+    ("wtorek", "Wtorek"),
+    ("sroda", "Środa"),
+    ("czwartek", "Czwartek"),
+    ("piatek", "Piątek"),
+    ("sobota", "Sobota"),
+    ("niedziela", "Niedziela"),
+]
+# weekday index: Monday=0 ... Sunday=6
+WEEKDAY_INDEX = {k: i for i, (k, _) in enumerate(WEEKDAYS_PL)}
+DEFAULT_HOURS = ["16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00"]
+
+
 def _training_key(pid: int) -> str:
     return f"training_poll_{pid}"
 
@@ -438,15 +455,40 @@ def _next_training_id() -> int:
     return n
 
 
+def _next_weekday_dt(weekday: int, hour: int, minute: int) -> datetime:
+    """Najbliższy wybrany dzień tygodnia (0=pn) o danej godzinie Europe/Warsaw."""
+    now = datetime.now(TZ)
+    days_ahead = (weekday - now.weekday()) % 7
+    candidate = (now + timedelta(days=days_ahead)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    if candidate <= now + timedelta(minutes=5):
+        candidate += timedelta(days=7)
+    return candidate
+
+
 def training_embed(data: dict, closed: bool = False) -> discord.Embed:
+    phase = data.get("phase") or "days"
     opts = data.get("options") or []
     votes = data.get("votes") or {}
-    closes = data.get("closes_at")
-    when = f"<t:{closes}:R>" if closes else "—"
+    title_map = {
+        "days": "🏋️ Trening – który dzień?",
+        "hours": "🏋️ Trening – o której?",
+        "done": "🏋️ Trening – ustalone",
+    }
+    title = title_map.get(phase, "🏋️ Trening")
+    if closed or phase == "done":
+        title += " · zamknięte"
+    day_label = data.get("winning_day_label") or ""
+    desc = data.get("question") or "Głosujcie przyciskiem."
+    if phase == "hours" and day_label:
+        desc = f"**Dzień: {day_label}**\nWybierzcie godzinę."
+    if phase == "done":
+        desc = data.get("result_text") or "Termin ustalony."
     emb = discord.Embed(
-        title="🏋️ Ankieta treningu" + (" · zamknięta" if closed else ""),
-        description=(data.get("question") or "Kiedy możecie na trening?") + f"\n\nZamykam {when}",
-        color=0x95A5A6 if closed else 0x5865F2,
+        title=title,
+        description=desc,
+        color=0x95A5A6 if (closed or phase == "done") else 0x5865F2,
     )
     counts = [0] * len(opts)
     by_opt: list[list[str]] = [[] for _ in opts]
@@ -459,21 +501,25 @@ def training_embed(data: dict, closed: bool = False) -> discord.Embed:
             counts[oi] += 1
             by_opt[oi].append(f"<@{uid}>")
     for i, opt in enumerate(opts):
-        people = ", ".join(by_opt[i][:12]) if by_opt[i] else "_brak_"
-        more = f" +{len(by_opt[i])-12}" if len(by_opt[i]) > 12 else ""
-        emb.add_field(name=f"{i+1}. {opt} ({counts[i]})", value=people + more, inline=False)
-    emb.set_footer(text=f"ID {data.get('id')} · głosuj przyciskiem")
+        people = ", ".join(by_opt[i][:10]) if by_opt[i] else "_brak_"
+        more = f" +{len(by_opt[i])-10}" if len(by_opt[i]) > 10 else ""
+        emb.add_field(name=f"{opt} ({counts[i]})", value=people + more, inline=True)
+    emb.set_footer(text=f"ID {data.get('id')} · faza: {phase}")
     return emb
 
 
-def training_view(pid: int, options: list[str] | int) -> discord.ui.View:
-    if isinstance(options, int):
-        labels = [f"Opcja {i+1}" for i in range(options)]
-    else:
-        labels = list(options)
+def training_view(pid: int, data: dict) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    for i, lab in enumerate(labels):
-        view.add_item(TreningButton(pid, i, label=str(lab)[:80]))
+    phase = data.get("phase") or "days"
+    opts = data.get("options") or []
+    if phase in ("days", "hours") and not data.get("closed"):
+        for i, lab in enumerate(opts[:7]):
+            view.add_item(TreningButton(pid, i, label=str(lab)[:80]))
+        # staff controls
+        if phase == "days":
+            view.add_item(TreningStaffButton(pid, "hours", "Dalej: godziny"))
+        elif phase == "hours":
+            view.add_item(TreningStaffButton(pid, "event", "Utwórz wydarzenie"))
     return view
 
 
@@ -491,18 +537,12 @@ class TreningButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindol
 
     @classmethod
     async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
-        return cls(int(match["pid"]), int(match["opt"]))
+        return cls(int(match["pid"]), int(match["opt"]), item.label or "?")
 
     async def callback(self, interaction: discord.Interaction):
         data = _load_training(self.pid)
-        if not data or data.get("closed"):
+        if not data or data.get("closed") or data.get("phase") == "done":
             await interaction.response.send_message("Ta ankieta jest już zamknięta.", ephemeral=True)
-            return
-        closes = data.get("closes_at") or 0
-        if closes and int(datetime.now(TZ).timestamp()) >= int(closes):
-            data["closed"] = True
-            _save_training(self.pid, data)
-            await interaction.response.send_message("Ankieta właśnie się zamknęła.", ephemeral=True)
             return
         opts = data.get("options") or []
         if self.opt < 0 or self.opt >= len(opts):
@@ -512,55 +552,134 @@ class TreningButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindol
         votes[str(interaction.user.id)] = self.opt
         data["votes"] = votes
         _save_training(self.pid, data)
-        emb = training_embed(data, closed=False)
+        emb = training_embed(data)
         try:
-            await interaction.response.edit_message(embed=emb, view=training_view(self.pid, opts))
+            await interaction.response.edit_message(embed=emb, view=training_view(self.pid, data))
         except Exception:
-            await interaction.response.send_message(f"Zapisano głos: **{opts[self.opt]}**", ephemeral=True)
+            await interaction.response.send_message(f"Głos: **{opts[self.opt]}**", ephemeral=True)
 
 
-async def _close_training_poll(pid: int):
-    data = _load_training(pid)
-    if not data or data.get("closed"):
-        return
-    data["closed"] = True
-    _save_training(pid, data)
-    ch_id, msg_id = data.get("channel_id"), data.get("message_id")
-    if not ch_id or not msg_id:
-        return
-    try:
-        ch = await bot.get_channel_safe(int(ch_id))
-        if not ch:
+class TreningStaffButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_train_staff:(?P<pid>\d+):(?P<action>hours|event)"):
+    def __init__(self, pid: int, action: str, label: str = "Dalej"):
+        style = discord.ButtonStyle.success if action == "event" else discord.ButtonStyle.secondary
+        super().__init__(
+            discord.ui.Button(
+                label=label[:80],
+                style=style,
+                custom_id=f"pindolz_train_staff:{pid}:{action}",
+            )
+        )
+        self.pid = pid
+        self.action = action
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["pid"]), match["action"], item.label or "Dalej")
+
+    async def callback(self, interaction: discord.Interaction):
+        if not bot.is_staff(interaction):
+            await interaction.response.send_message("Tylko sztab.", ephemeral=True)
             return
-        msg = await ch.fetch_message(int(msg_id))
-        await msg.edit(embed=training_embed(data, closed=True), view=None)
-        opts = data.get("options") or []
-        votes = data.get("votes") or {}
-        counts = [0] * len(opts)
-        for oi in votes.values():
-            try:
-                oi = int(oi)
-                if 0 <= oi < len(opts):
-                    counts[oi] += 1
-            except (TypeError, ValueError):
-                pass
-        if counts and any(counts):
-            best = max(range(len(opts)), key=lambda i: counts[i])
-            summary = f"**Wynik treningu:** {opts[best]} ({counts[best]} głosów)"
+        data = _load_training(self.pid)
+        if not data:
+            await interaction.response.send_message("Brak ankiety.", ephemeral=True)
+            return
+        if self.action == "hours":
+            await bot._trening_advance_to_hours(interaction, self.pid, data)
         else:
-            summary = "**Wynik treningu:** brak głosów"
-        await ch.send(summary)
-    except Exception as e:
-        print(f"[trening] close {pid}: {e}")
+            await bot._trening_create_event(interaction, self.pid, data)
 
 
-async def _schedule_training_close(pid: int, closes_at: int):
-    delay = max(5, int(closes_at) - int(datetime.now(TZ).timestamp()))
-    try:
-        await asyncio.sleep(delay)
-    except asyncio.CancelledError:
-        return
-    await _close_training_poll(pid)
+class TreningSetupView(discord.ui.View):
+    """Ephemeral: wybór dni tygodnia i publikacja ankiety."""
+
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.selected_days: list[str] = []
+        self.add_item(TreningDaySelect(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id and not bot.is_staff(interaction):
+            await interaction.response.send_message("To nie Twoja ankieta.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Opublikuj ankietę dni", style=discord.ButtonStyle.success, row=2)
+    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_days:
+            await interaction.response.send_message("Wybierz przynajmniej jeden dzień.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        ch_id = db.get_config_int("poll_channel_id")
+        if not ch_id:
+            await interaction.followup.send(
+                "Brak kanału ankiet. Ustaw: `/setup-ankiety` (albo w `/setup-all` jeśli dodane).",
+                ephemeral=True,
+            )
+            return
+        channel = await bot.get_channel_safe(ch_id)
+        if channel is None:
+            await interaction.followup.send("Nie mogę otworzyć kanału ankiet.", ephemeral=True)
+            return
+        # preserve order Mon-Sun
+        order_keys = [k for k, _ in WEEKDAYS_PL]
+        days = [k for k in order_keys if k in self.selected_days]
+        labels = [dict(WEEKDAYS_PL)[k] for k in days]
+        pid = _next_training_id()
+        data = {
+            "id": pid,
+            "phase": "days",
+            "day_keys": days,
+            "options": labels,
+            "votes": {},
+            "closed": False,
+            "question": "Którego dnia robimy trening? (jeden wybór)",
+            "channel_id": channel.id,
+            "guild_id": interaction.guild.id if interaction.guild else None,
+            "created_by": interaction.user.id,
+            "hours_options": list(DEFAULT_HOURS),
+        }
+        content = None
+        try:
+            role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
+            if role_ids:
+                content = " ".join(f"<@&{r}>" for r in role_ids)
+        except Exception:
+            pass
+        emb = training_embed(data)
+        msg = await channel.send(content=content, embed=emb, view=training_view(pid, data))
+        data["message_id"] = msg.id
+        _save_training(pid, data)
+        await interaction.followup.send(
+            f"✅ Ankieta dni **#{pid}** na {channel.mention}.\n"
+            f"Po głosowaniu kliknij **Dalej: godziny** (sztab).",
+            ephemeral=True,
+        )
+
+
+class TreningDaySelect(discord.ui.Select):
+    def __init__(self, parent: "TreningSetupView"):
+        options = [
+            discord.SelectOption(label=label, value=key, description="Włącz ten dzień w ankiecie")
+            for key, label in WEEKDAYS_PL
+        ]
+        super().__init__(
+            placeholder="Wybierz dni do ankiety (1–7)",
+            min_values=1,
+            max_values=7,
+            options=options,
+            row=0,
+        )
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.selected_days = list(self.values)
+        labels = [dict(WEEKDAYS_PL)[k] for k in self.parent_view.selected_days]
+        await interaction.response.send_message(
+            "Wybrane dni: **" + ", ".join(labels) + "**\nKliknij **Opublikuj ankietę dni**.",
+            ephemeral=True,
+        )
 
 
 def poll_view(mid: int) -> discord.ui.View:
@@ -934,9 +1053,11 @@ class SetupPanelView(discord.ui.View):
         self.main_id: int | None = db.get_config_int("main_channel_id")
         self.live_id: int | None = db.get_config_int("live_channel_id")
         self.table_id: int | None = db.get_config_int("table_channel_id")
+        self.announce_id: int | None = db.get_config_int("announce_channel_id")
         self.add_item(SetupChannelSelect(self, "main", "Kanał główny (wyniki)", 0))
         self.add_item(SetupChannelSelect(self, "live", "Kanał LIVE", 1))
         self.add_item(SetupChannelSelect(self, "table", "Kanał tabeli", 2))
+        self.add_item(SetupChannelSelect(self, "announce", "Kanał ogłoszeń", 3))
 
     def build_embed(self) -> discord.Embed:
         def ch(cid):
@@ -945,7 +1066,8 @@ class SetupPanelView(discord.ui.View):
         emb.add_field(name="Główny", value=ch(self.main_id), inline=True)
         emb.add_field(name="LIVE", value=ch(self.live_id), inline=True)
         emb.add_field(name="Tabela", value=ch(self.table_id), inline=True)
-        emb.set_footer(text="Tylko właściciel · panel 5 min")
+        emb.add_field(name="Ogłoszenia", value=ch(self.announce_id), inline=True)
+        emb.set_footer(text="Ogłoszenia: tylko treningi")
         return emb
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -962,6 +1084,8 @@ class SetupPanelView(discord.ui.View):
         db.set_config("main_channel_id", str(self.main_id))
         db.set_config("live_channel_id", str(self.live_id))
         db.set_config("table_channel_id", str(self.table_id))
+        if getattr(self, "announce_id", None):
+            db.set_config("announce_channel_id", str(self.announce_id))
         await interaction.response.defer(ephemeral=True)
         note = ""
         try:
@@ -995,8 +1119,10 @@ class SetupChannelSelect(discord.ui.ChannelSelect):
             self.panel.main_id = cid
         elif self.kind == "live":
             self.panel.live_id = cid
-        else:
+        elif self.kind == "table":
             self.panel.table_id = cid
+        else:
+            self.panel.announce_id = cid
         await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
 
 
@@ -1319,7 +1445,7 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         try:
-            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, MvpButton)
+            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, TreningStaffButton, MvpButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
         asyncio.create_task(self._soft_start_tasks())
@@ -1595,6 +1721,36 @@ class PindolzBot(commands.Bot):
     def _table_channel_id(self) -> int | None:
         return db.get_config_int("table_channel_id")
 
+    def _poll_channel_id(self) -> int | None:
+        return db.get_config_int("poll_channel_id")
+
+    def _announce_channel_id(self) -> int | None:
+
+        """Kanał ogłoszeń; jeśli brak – kanał główny."""
+        return db.get_config_int("announce_channel_id") or self._main_channel_id()
+
+    async def send_announcement(
+        self,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+        *,
+        fallback_channel=None,
+    ):
+        """Wysyła na kanał ogłoszeń (lub fallback / główny)."""
+        ch = await self.get_channel_safe(self._announce_channel_id())
+        if not ch and fallback_channel is not None:
+            ch = fallback_channel
+        if not ch:
+            ch = await self.get_channel_safe(self._main_channel_id())
+        if not ch:
+            print("[ogloszenia] brak kanału")
+            return None
+        try:
+            return await ch.send(content=content, embed=embed)
+        except Exception as e:
+            print(f"[ogloszenia] send: {e}")
+            return None
+
     def _table_msg(self) -> tuple[int | None, int | None]:
         return db.get_config_int("msg_table_id"), db.get_config_int("msg_table_ch")
 
@@ -1798,6 +1954,7 @@ class PindolzBot(commands.Bot):
                             content="⚠️ **Zmiana terminu meczu!**",
                             embed=embeds.schedule_changed_embed(m, row.get("match_date"), row.get("match_time")),
                         )
+
                         except Exception as e:
                             print(f"[schedule] send error: {e}")
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
@@ -2146,6 +2303,163 @@ class PindolzBot(commands.Bot):
             except Exception as e:
                 print(f"[zaplanuj] #{sid}: {e}")
 
+
+    async def _trening_advance_to_hours(self, interaction: discord.Interaction, pid: int, data: dict):
+        if data.get("phase") != "days":
+            await interaction.response.send_message("Ta ankieta nie jest w fazie dni.", ephemeral=True)
+            return
+        opts = data.get("options") or []
+        votes = data.get("votes") or {}
+        if not opts:
+            await interaction.response.send_message("Brak opcji.", ephemeral=True)
+            return
+        counts = [0] * len(opts)
+        for v in votes.values():
+            try:
+                vi = int(v)
+                if 0 <= vi < len(counts):
+                    counts[vi] += 1
+            except Exception:
+                pass
+        best = max(range(len(opts)), key=lambda i: counts[i])
+        if counts[best] == 0:
+            await interaction.response.send_message("Nikt jeszcze nie zagłosował.", ephemeral=True)
+            return
+        day_keys = data.get("day_keys") or []
+        winning_key = day_keys[best] if best < len(day_keys) else None
+        winning_label = opts[best]
+        hours = data.get("hours_options") or list(DEFAULT_HOURS)
+        data["phase"] = "hours"
+        data["winning_day_key"] = winning_key
+        data["winning_day_label"] = winning_label
+        data["options"] = list(hours)
+        data["votes"] = {}
+        data["question"] = f"Dzień: **{winning_label}** – o której godzinie?"
+        _save_training(pid, data)
+        emb = training_embed(data)
+        try:
+            await interaction.response.edit_message(embed=emb, view=training_view(pid, data))
+        except Exception:
+            await interaction.response.send_message("Przeszedłem do fazy godzin.", ephemeral=True)
+            ch = await self.get_channel_safe(data.get("channel_id"))
+            if ch and data.get("message_id"):
+                try:
+                    msg = await ch.fetch_message(int(data["message_id"]))
+                    await msg.edit(embed=emb, view=training_view(pid, data))
+                except Exception:
+                    pass
+        # announce
+        try:
+            await self.send_announcement(
+                f"📅 Wybrany dzień treningu: **{winning_label}** ({counts[best]} głosów). "
+                f"Głosujcie na **godzinę** w ankiecie."
+            )
+        except Exception:
+            pass
+
+    async def _trening_create_event(self, interaction: discord.Interaction, pid: int, data: dict):
+        if data.get("phase") != "hours":
+            await interaction.response.send_message("Najpierw zakończ wybór dnia (Dalej: godziny).", ephemeral=True)
+            return
+        opts = data.get("options") or []
+        votes = data.get("votes") or {}
+        if not opts:
+            await interaction.response.send_message("Brak godzin.", ephemeral=True)
+            return
+        counts = [0] * len(opts)
+        for v in votes.values():
+            try:
+                vi = int(v)
+                if 0 <= vi < len(counts):
+                    counts[vi] += 1
+            except Exception:
+                pass
+        best = max(range(len(opts)), key=lambda i: counts[i])
+        if counts[best] == 0:
+            await interaction.response.send_message("Nikt nie zagłosował na godzinę.", ephemeral=True)
+            return
+        hour_s = opts[best]
+        try:
+            hh, mm = hour_s.split(":")
+            hour_i, min_i = int(hh), int(mm)
+        except Exception:
+            await interaction.response.send_message("Zła godzina.", ephemeral=True)
+            return
+        day_key = data.get("winning_day_key")
+        day_label = data.get("winning_day_label") or "?"
+        if day_key not in WEEKDAY_INDEX:
+            await interaction.response.send_message("Brak wybranego dnia.", ephemeral=True)
+            return
+        start_dt = _next_weekday_dt(WEEKDAY_INDEX[day_key], hour_i, min_i)
+        end_dt = start_dt + timedelta(hours=2)
+        guild = interaction.guild
+        if not guild and data.get("guild_id"):
+            guild = self.get_guild(int(data["guild_id"]))
+        if not guild:
+            await interaction.response.send_message("Brak serwera.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        # create event
+        ev = None
+        try:
+            ev = await guild.create_scheduled_event(
+                name=f"Trening PINDOLZ · {day_label} {hour_s}",
+                start_time=start_dt.astimezone(ZoneInfo("UTC")),
+                end_time=end_dt.astimezone(ZoneInfo("UTC")),
+                description=f"Trening ustalony ankietą #{pid}.\nDzień: {day_label}\nGodzina: {hour_s} (Europe/Warsaw)",
+                location="Online / VC drużyny",
+                entity_type=discord.EntityType.external,
+                privacy_level=discord.PrivacyLevel.guild_only,
+            )
+        except Exception as e1:
+            try:
+                # fallback bez external
+                ev = await guild.create_scheduled_event(
+                    name=f"Trening PINDOLZ · {day_label} {hour_s}",
+                    start_time=start_dt,
+                    end_time=end_dt,
+                    description=f"Trening #{pid} · {day_label} {hour_s}",
+                    location="Online",
+                )
+            except Exception as e2:
+                await interaction.followup.send(f"Nie udało się utworzyć wydarzenia: {e2}", ephemeral=True)
+                print(f"[trening] event error: {e1} / {e2}")
+                return
+        result = (
+            f"**{day_label}** o **{hour_s}**\n"
+            f"🗓 <t:{int(start_dt.timestamp())}:F> · <t:{int(start_dt.timestamp())}:R>"
+        )
+        if ev:
+            result += f"\n📎 Wydarzenie: {ev.url}" if getattr(ev, "url", None) else f"\n📎 Wydarzenie ID: {ev.id}"
+        data["phase"] = "done"
+        data["closed"] = True
+        data["result_text"] = result
+        data["event_id"] = getattr(ev, "id", None)
+        data["start_ts"] = int(start_dt.timestamp())
+        _save_training(pid, data)
+        emb = training_embed(data, closed=True)
+        ch = await self.get_channel_safe(data.get("channel_id"))
+        if ch and data.get("message_id"):
+            try:
+                msg = await ch.fetch_message(int(data["message_id"]))
+                await msg.edit(embed=emb, view=None)
+            except Exception:
+                pass
+        # ogłoszenie na kanale ogłoszeń
+        announce = (
+            f"🏋️ **Trening ustalony!**\n"
+            f"{result}\n"
+            f"Do zobaczenia na VC."
+        )
+        try:
+            role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
+            if role_ids:
+                announce = " ".join(f"<@&{r}>" for r in role_ids) + "\n" + announce
+        except Exception:
+            pass
+        await self.send_announcement(announce, fallback_channel=ch)
+        await interaction.followup.send(f"✅ Wydarzenie utworzone.\n{result}", ephemeral=True)
+        print(f"[trening] event #{pid} {day_label} {hour_s} ts={start_dt}")
 
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
     @guarded
@@ -3057,8 +3371,8 @@ def _demo_embeds(user_id: int) -> list[tuple[str, discord.Embed]]:
     return out
 
 
-@bot.tree.command(name="setup-ankiety", description="Ustaw osobny kanał na ankiety dostępności (właściciel)")
-@app_commands.describe(kanal="Kanał, na którym bot będzie pytał „Kto może grać?”")
+@bot.tree.command(name="setup-ankiety", description="Ustaw kanał na wszystkie ankiety: dostępność + trening (właściciel)")
+@app_commands.describe(kanal="Kanał ankiet (dostępność, trening)")
 async def cmd_setup_ankiety(interaction: discord.Interaction, kanal: discord.TextChannel):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
@@ -3069,6 +3383,20 @@ async def cmd_setup_ankiety(interaction: discord.Interaction, kanal: discord.Tex
     await interaction.response.send_message(
         f"Kanał ankiet ustawiony na {kanal.mention}.\nPingowane role: {roles_txt}\n"
         "Ankieta pojawi się, gdy najbliższy mecz będzie miał ustaloną datę i godzinę.",
+        ephemeral=True,
+    )
+
+
+
+@bot.tree.command(name="setup-ogloszenia", description="Ustaw kanał ogłoszeń (właściciel)")
+@app_commands.describe(kanal="Kanał na ogłoszenia treningów")
+async def cmd_setup_ogloszenia(interaction: discord.Interaction, kanal: discord.TextChannel):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    db.set_config("announce_channel_id", str(kanal.id))
+    await interaction.response.send_message(
+        f"Kanał ogłoszeń: {kanal.mention}\nTam bot pisze tylko o treningach (ankiety i ustalony termin).",
         ephemeral=True,
     )
 
@@ -3398,77 +3726,59 @@ async def cmd_sztab(interaction: discord.Interaction):
 
 
 
-@bot.tree.command(name="trening", description="Ankieta terminu treningu z auto-zamknięciem (sztab)")
-@app_commands.describe(
-    opcja1="Termin / opcja 1",
-    opcja2="Termin / opcja 2",
-    opcja3="Opcja 3 (opcjonalnie)",
-    opcja4="Opcja 4 (opcjonalnie)",
-    godziny="Po ilu godzinach zamknąć (1–72, domyślnie 24)",
-    pytanie="Treść ankiety (opcjonalnie)",
-)
-async def cmd_trening(
-    interaction: discord.Interaction,
-    opcja1: str,
-    opcja2: str,
-    opcja3: Optional[str] = None,
-    opcja4: Optional[str] = None,
-    godziny: app_commands.Range[int, 1, 72] = 24,
-    pytanie: Optional[str] = None,
-):
+@bot.tree.command(name="trening", description="Ankieta treningu: dni → godziny → wydarzenie (sztab)")
+async def cmd_trening(interaction: discord.Interaction):
     if not bot.is_staff(interaction):
-        await interaction.response.send_message("Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True)
+        await interaction.response.send_message(
+            "Tylko właściciel, kapitan, vicekapitan lub coach.", ephemeral=True
+        )
         return
     if interaction.guild is None:
         await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
         return
-    opts = [opcja1.strip(), opcja2.strip()]
-    if opcja3 and opcja3.strip():
-        opts.append(opcja3.strip())
-    if opcja4 and opcja4.strip():
-        opts.append(opcja4.strip())
-    opts = [o[:80] for o in opts if o]
-    if len(opts) < 2:
-        await interaction.response.send_message("Podaj co najmniej 2 opcje.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    ch_id = db.get_config_int("poll_channel_id") or db.get_config_int("main_channel_id")
-    channel = interaction.channel
-    if ch_id:
-        ch2 = await bot.get_channel_safe(ch_id)
-        if ch2:
-            channel = ch2
-    pid = _next_training_id()
-    closes_at = int(datetime.now(TZ).timestamp()) + int(godziny) * 3600
-    data = {
-        "id": pid,
-        "options": opts,
-        "votes": {},
-        "closes_at": closes_at,
-        "closed": False,
-        "question": (pytanie or "Kiedy możecie na trening?").strip()[:200],
-        "channel_id": channel.id if channel else None,
-        "created_by": interaction.user.id,
-    }
-    # role ping
-    content = None
-    try:
-        role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
-        if role_ids:
-            content = " ".join(f"<@&{r}>" for r in role_ids)
-    except Exception:
-        pass
-    emb = training_embed(data, closed=False)
-    msg = await channel.send(content=content, embed=emb, view=training_view(pid, opts))
-    data["message_id"] = msg.id
-    data["channel_id"] = channel.id
-    _save_training(pid, data)
-    asyncio.create_task(_schedule_training_close(pid, closes_at))
-    await interaction.followup.send(
-        f"✅ Ankieta treningu **#{pid}** na {channel.mention} · zamykam <t:{closes_at}:R> ({godziny} h)",
-        ephemeral=True,
+    emb = discord.Embed(
+        title="🏋️ Nowy trening – krok 1",
+        description=(
+            "1. Zaznacz **dni tygodnia**, które mają być w ankiecie\n"
+            "2. Kliknij **Opublikuj ankietę dni**\n"
+            "3. Po głosowaniu sztab klika **Dalej: godziny**\n"
+            "4. Po głosowaniu na godzinę: **Utwórz wydarzenie**\n\n"
+            "Bot ogłosi termin i utworzy wydarzenie na serwerze."
+        ),
+        color=0x5865F2,
     )
+    view = TreningSetupView(interaction.user.id)
+    await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
 
+
+
+@bot.tree.command(name="ogloszenie", description="Wyślij ogłoszenie na kanał ogłoszeń (sztab)")
+@app_commands.describe(tresc="Treść ogłoszenia", ping_roli="Opcjonalny ping roli")
+async def cmd_ogloszenie(
+    interaction: discord.Interaction,
+    tresc: str,
+    ping_roli: Optional[discord.Role] = None,
+):
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko sztab.", ephemeral=True)
+        return
+    text = (tresc or "").strip()
+    if not text:
+        await interaction.response.send_message("Pusta treść.", ephemeral=True)
+        return
+    emb = discord.Embed(title="📢 Ogłoszenie", description=text[:4000], color=0x5865F2)
+    emb.set_footer(text=f"Od {interaction.user.display_name}")
+    msg = await bot.send_announcement(
+        content=ping_roli.mention if ping_roli else None,
+        embed=emb,
+    )
+    if not msg:
+        await interaction.response.send_message(
+            "Brak kanału ogłoszeń. Ustaw: `/setup-ogloszenia` lub `/setup-all`.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(f"✅ Wysłano na {msg.channel.mention}", ephemeral=True)
 
 
 @bot.tree.command(name="zaplanuj", description="Zaplanuj wiadomość na kanał (sztab)")
