@@ -57,22 +57,23 @@ LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
 # Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
 # Soft-start: mecz → komendy@60s → tło → utrzymanie (~3 min)
-START_DELAY_LIVE = 15
-START_DELAY_PREMATCH = 30
-START_DELAY_DAILY = 45
-START_DELAY_COMMANDS = 60
-START_DELAY_TABLE = 75
-START_DELAY_STATUS = 90
-START_DELAY_POLL = 105
-START_DELAY_API = 120
-START_DELAY_EVENT = 135
-START_DELAY_CLEANUP = 150
-START_DELAY_UPDATE = 165
-START_DELAY_WEEKLY = 180
-START_DELAY_COMMANDS_SYNC = 60
+# Soft-start łącznie ~90 s od ready
+START_DELAY_LIVE = 4
+START_DELAY_PREMATCH = 8
+START_DELAY_DAILY = 12
+START_DELAY_COMMANDS = 16
+START_DELAY_TABLE = 20
+START_DELAY_STATUS = 30
+START_DELAY_POLL = 40
+START_DELAY_API = 50
+START_DELAY_EVENT = 60
+START_DELAY_CLEANUP = 70
+START_DELAY_UPDATE = 80
+START_DELAY_WEEKLY = 90
+START_DELAY_COMMANDS_SYNC = 16
 
-# Kolejność startu komend slash (po jednej, co COMMAND_START_GAP s)
-COMMAND_START_GAP = 2
+# Kolejność startu komend slash (UI; krótka przerwa, by zmieścić się w 90 s)
+COMMAND_START_GAP = 0.35
 COMMAND_START_ORDER = [
     "pomoc",
     "setup",
@@ -1337,9 +1338,9 @@ class PindolzBot(commands.Bot):
 
 
     async def _soft_start_tasks(self):
-        """Mecz → komendy (60s) → tło → utrzymanie."""
+        """Mecz → komendy → tło → utrzymanie (łącznie ~90 s)."""
         await self.wait_until_ready()
-        print("[start] soft-start (~3 min)…")
+        print("[start] soft-start (~90 s)…")
         done: set[str] = set()
 
         async def run_step(key: str, wait: float, action):
@@ -1452,7 +1453,7 @@ class PindolzBot(commands.Bot):
         await run_step("live", START_DELAY_LIVE, start_live)
         await run_step("prematch", START_DELAY_PREMATCH - START_DELAY_LIVE, start_prematch)
         await run_step("daily", START_DELAY_DAILY - START_DELAY_PREMATCH, start_daily)
-        # Faza 2 – komendy @ 60s
+        # Faza 2 – komendy
         await run_step("commands", START_DELAY_COMMANDS - START_DELAY_DAILY, start_commands)
         # Faza 3 – tło
         await run_step("table", START_DELAY_TABLE - START_DELAY_COMMANDS, start_table)
