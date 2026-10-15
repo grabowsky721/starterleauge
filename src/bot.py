@@ -105,6 +105,7 @@ COMMAND_START_ORDER = [
     "vicekapitan",
     "sztab",
     "trening",
+    "zaplanuj",
 ]
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
@@ -182,11 +183,48 @@ FEATURES = {
     "polls": ("Ankiety", "🗳️ Ankieta „Kto może grać?”"),
     "rank": ("Awans/spadek", "📈 Powiadomienie o zmianie miejsca w tabeli"),
     "alerts": ("Alerty API", "🚨 Wiadomość prywatna o awarii API"),
+    "quiet": ("Ciche godziny", "🌙 W nocy (23–8) tylko LIVE – bez tabeli/daily/prematch"),
 }
 
 
 def feature_on(name: str) -> bool:
     return db.get_config(f"feat_{name}") != "0"
+
+
+def quiet_now() -> bool:
+    """True gdy włączone ciche godziny i jesteśmy w oknie 23:00–07:59 Europe/Warsaw."""
+    if not feature_on("quiet"):
+        return False
+    h = datetime.now(TZ).hour
+    return h >= 23 or h < 8
+
+
+def _sched_key(sid: int) -> str:
+    return f"sched_msg_{sid}"
+
+
+def _load_sched(sid: int) -> dict | None:
+    try:
+        raw = db.get_config(_sched_key(sid))
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _save_sched(sid: int, data: dict) -> None:
+    db.set_config(_sched_key(sid), json.dumps(data, ensure_ascii=False))
+
+
+def _next_sched_id() -> int:
+    n = int(db.get_config("sched_msg_seq") or "1")
+    db.set_config("sched_msg_seq", str(n + 1))
+    return n
+
+
+def _mvp_key(mid: int) -> str:
+    return f"mvp_votes_{mid}"
+
+
 
 
 def _player_nicks() -> dict[int, str]:
@@ -206,7 +244,7 @@ def _win_gifs() -> list[str]:
 
 LOOP_NAMES = (
     "table_update", "daily_check", "prematch_check", "live_check", "weekly_summary", "status_loop",
-    "poll_check", "event_check", "update_check", "api_watch", "cleanup_task",
+    "poll_check", "event_check", "update_check", "api_watch", "cleanup_task", "scheduled_messages_loop",
 )
 
 # Klucze konfiguracji tworzone osobno dla każdego meczu (sprzątane po 60 dniach bez zmian)
@@ -336,6 +374,27 @@ POLL_BUTTONS = {
     "no": ("Nie mogę", "❌", discord.ButtonStyle.danger),
     "maybe": ("Może", "❔", discord.ButtonStyle.secondary),
 }
+
+
+
+class MvpButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_mvp:(?P<mid>\d+):(?P<idx>\d+)"):
+    def __init__(self, mid: int, idx: int, label: str = "?"):
+        super().__init__(
+            discord.ui.Button(
+                label=label[:80],
+                style=discord.ButtonStyle.primary,
+                custom_id=f"pindolz_mvp:{mid}:{idx}",
+            )
+        )
+        self.mid = mid
+        self.idx = idx
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["mid"]), int(match["idx"]), item.label or "?")
+
+    async def callback(self, interaction: discord.Interaction):
+        await bot._handle_mvp_vote(interaction, self.mid, self.idx)
 
 
 class PollButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_poll:(?P<mid>\d+):(?P<vote>yes|no|maybe)"):
@@ -1258,7 +1317,7 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         try:
-            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton)
+            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, MvpButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
         asyncio.create_task(self._soft_start_tasks())
@@ -1340,7 +1399,7 @@ class PindolzBot(commands.Bot):
     async def _soft_start_tasks(self):
         """Mecz → komendy → tło → utrzymanie (łącznie ~90 s)."""
         await self.wait_until_ready()
-        print("[start] soft-start (~90 s)…")
+        print("[start] soft-start (~90 s) · zaplanuj/mvp/quiet…")
         done: set[str] = set()
 
         async def run_step(key: str, wait: float, action):
@@ -1449,6 +1508,10 @@ class PindolzBot(commands.Bot):
             if not self.weekly_summary.is_running():
                 self.weekly_summary.start()
 
+        async def start_scheduled():
+            if not self.scheduled_messages_loop.is_running():
+                self.scheduled_messages_loop.start()
+
         # Faza 1 – mecz
         await run_step("live", START_DELAY_LIVE, start_live)
         await run_step("prematch", START_DELAY_PREMATCH - START_DELAY_LIVE, start_prematch)
@@ -1464,6 +1527,7 @@ class PindolzBot(commands.Bot):
         # Faza 4 – utrzymanie
         await run_step("cleanup", START_DELAY_CLEANUP - START_DELAY_EVENT, start_cleanup)
         await run_step("update", START_DELAY_UPDATE - START_DELAY_CLEANUP, start_update)
+        await run_step("scheduled", 0, start_scheduled)
         await run_step("weekly", START_DELAY_WEEKLY - START_DELAY_UPDATE, start_weekly)
 
         if not self.loop_watchdog.is_running():
@@ -1595,6 +1659,8 @@ class PindolzBot(commands.Bot):
     @tasks.loop(time=TABLE_UPDATE_TIMES)
     @guarded
     async def table_update(self):
+        if quiet_now():
+            return
         await self._run_table_update()
 
     @table_update.before_loop
@@ -1638,6 +1704,8 @@ class PindolzBot(commands.Bot):
     @tasks.loop(minutes=10)
     @guarded
     async def daily_check(self):
+        if quiet_now():
+            return
         await self._run_daily_check()
 
     @daily_check.before_loop
@@ -1689,6 +1757,7 @@ class PindolzBot(commands.Bot):
             await self._react_result(ch_id, msg_id, m)
             await self._post_win_gif(ch_id, m)
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
+            await self._start_mvp_vote(channel, m)
             if row and row.get("msg_live_id"):
                 try:
                     live_ch = await self.get_channel_safe(row.get("msg_live_ch"))
@@ -1717,7 +1786,10 @@ class PindolzBot(commands.Bot):
                     msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), row.get("msg_upcoming_id"), row.get("msg_upcoming_ch"), view=remind_view(mid))
                     if date_changed:
                         try:
-                            await channel.send(embed=embeds.schedule_changed_embed(m, row.get("match_date"), row.get("match_time")))
+                            await channel.send(
+                            content="⚠️ **Zmiana terminu meczu!**",
+                            embed=embeds.schedule_changed_embed(m, row.get("match_date"), row.get("match_time")),
+                        )
                         except Exception as e:
                             print(f"[schedule] send error: {e}")
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
@@ -1738,6 +1810,8 @@ class PindolzBot(commands.Bot):
     @tasks.loop(minutes=1)
     @guarded
     async def prematch_check(self):
+        if quiet_now():
+            return
         channel = await self.get_channel_safe(self._main_channel_id())
         try:
             upcoming = self._upcoming_cached()
@@ -1888,6 +1962,179 @@ class PindolzBot(commands.Bot):
 
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
     @guarded
+
+    async def _start_mvp_vote(self, channel, match: dict):
+        """Po meczu: głosowanie MVP – do 5 osób ze składu / powiązań."""
+        mid = match.get("id")
+        if mid is None or not channel:
+            return
+        if db.get_config(_mvp_key(mid)):
+            return  # już było
+        players: list[tuple[int, str]] = []
+        try:
+            ids = [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
+        except Exception:
+            ids = []
+        nicks = _player_nicks()
+        for uid in ids[:5]:
+            players.append((uid, nicks.get(uid) or f"Gracz"))
+        if len(players) < 2:
+            # uzupełnij z powiązań
+            for uid, nick in list(nicks.items()):
+                if uid not in {p[0] for p in players}:
+                    players.append((uid, nick))
+                if len(players) >= 5:
+                    break
+        if len(players) < 2:
+            return
+        players = players[:5]
+        data = {
+            "players": [{"id": u, "nick": n} for u, n in players],
+            "votes": {},
+            "closed": False,
+        }
+        db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
+        emb = discord.Embed(
+            title="⭐ MVP meczu – głosowanie",
+            description=f"PINDOLZ vs **{self._opponent(match)}**\nWybierz 1 z {len(players)} (głosujesz raz).",
+            color=0xF1C40F,
+        )
+        for i, (uid, nick) in enumerate(players):
+            emb.add_field(name=f"{i+1}. {nick}", value=f"<@{uid}>", inline=True)
+        view = discord.ui.View(timeout=None)
+        for i, (uid, nick) in enumerate(players):
+            view.add_item(MvpButton(int(mid), i, label=f"{i+1}. {nick[:60]}"))
+        try:
+            msg = await channel.send(embed=emb, view=view)
+            data["message_id"] = msg.id
+            data["channel_id"] = channel.id
+            db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
+            asyncio.create_task(self._close_mvp_later(int(mid), 30 * 60))
+        except Exception as e:
+            print(f"[mvp] start: {e}")
+
+    async def _handle_mvp_vote(self, interaction: discord.Interaction, mid: int, idx: int):
+        try:
+            data = json.loads(db.get_config(_mvp_key(mid)) or "{}")
+        except Exception:
+            data = {}
+        if data.get("closed"):
+            await interaction.response.send_message("Głosowanie zakończone.", ephemeral=True)
+            return
+        players = data.get("players") or []
+        if idx < 0 or idx >= len(players):
+            await interaction.response.send_message("Nieprawidłowy wybór.", ephemeral=True)
+            return
+        votes = data.setdefault("votes", {})
+        votes[str(interaction.user.id)] = idx
+        data["votes"] = votes
+        db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
+        # update counts on embed
+        counts = [0] * len(players)
+        for v in votes.values():
+            try:
+                vi = int(v)
+                if 0 <= vi < len(counts):
+                    counts[vi] += 1
+            except Exception:
+                pass
+        emb = discord.Embed(
+            title="⭐ MVP meczu – głosowanie",
+            description=f"Oddano **{len(votes)}** głosów. Wybierz 1 osobę.",
+            color=0xF1C40F,
+        )
+        for i, p in enumerate(players):
+            emb.add_field(
+                name=f"{i+1}. {p.get('nick')} ({counts[i]})",
+                value=f"<@{p.get('id')}>",
+                inline=True,
+            )
+        view = discord.ui.View(timeout=None)
+        for i, p in enumerate(players):
+            view.add_item(MvpButton(mid, i, label=f"{i+1}. {str(p.get('nick'))[:60]}"))
+        try:
+            await interaction.response.edit_message(embed=emb, view=view)
+        except Exception:
+            await interaction.response.send_message(
+                f"Głos na **{players[idx].get('nick')}** zapisany.", ephemeral=True
+            )
+
+    async def _close_mvp_later(self, mid: int, delay: int):
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        await self._close_mvp(mid)
+
+    async def _close_mvp(self, mid: int):
+        try:
+            data = json.loads(db.get_config(_mvp_key(mid)) or "{}")
+        except Exception:
+            return
+        if data.get("closed"):
+            return
+        data["closed"] = True
+        players = data.get("players") or []
+        votes = data.get("votes") or {}
+        counts = [0] * len(players)
+        for v in votes.values():
+            try:
+                vi = int(v)
+                if 0 <= vi < len(counts):
+                    counts[vi] += 1
+            except Exception:
+                pass
+        db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
+        ch_id, msg_id = data.get("channel_id"), data.get("message_id")
+        if not players:
+            return
+        best = max(range(len(players)), key=lambda i: counts[i]) if players else 0
+        winner = players[best]
+        emb = discord.Embed(
+            title="⭐ MVP meczu",
+            description=f"**{winner.get('nick')}** (<@{winner.get('id')}>) · {counts[best]} głosów",
+            color=0xF1C40F,
+        )
+        try:
+            if ch_id and msg_id:
+                ch = await self.get_channel_safe(int(ch_id))
+                if ch:
+                    msg = await ch.fetch_message(int(msg_id))
+                    await msg.edit(embed=emb, view=None)
+                    await ch.send(f"⭐ MVP: **{winner.get('nick')}** (<@{winner.get('id')}>)")
+        except Exception as e:
+            print(f"[mvp] close: {e}")
+
+    @tasks.loop(seconds=30)
+    @guarded
+    async def scheduled_messages_loop(self):
+        """Wysyła zaplanowane wiadomości (/zaplanuj)."""
+        now = int(datetime.now(TZ).timestamp())
+        try:
+            seq = int(db.get_config("sched_msg_seq") or "1")
+        except Exception:
+            return
+        for sid in range(max(1, seq - 100), seq):
+            data = _load_sched(sid)
+            if not data or data.get("sent"):
+                continue
+            when = int(data.get("when") or 0)
+            if when > now:
+                continue
+            ch_id = data.get("channel_id")
+            content = data.get("content") or ""
+            try:
+                ch = await self.get_channel_safe(int(ch_id)) if ch_id else None
+                if ch and content:
+                    ping = data.get("ping") or ""
+                    text = f"{ping} {content}".strip() if ping else content
+                    await ch.send(text[:2000])
+                data["sent"] = True
+                _save_sched(sid, data)
+                print(f"[zaplanuj] wysłano #{sid}")
+            except Exception as e:
+                print(f"[zaplanuj] #{sid}: {e}")
+
     async def weekly_summary(self):
         if datetime.now(TZ).weekday() != 6:
             return
@@ -1925,6 +2172,33 @@ class PindolzBot(commands.Bot):
             pass
         await channel.send(embed=embeds.weekly_summary_embed(week_matches, wins, losses, standing))
         print("[weekly] wysłano podsumowanie tygodnia")
+        # 12 – DM do kapitana
+        try:
+            cid = self.captain_id()
+            if cid:
+                user = self.get_user(cid) or await self.fetch_user(cid)
+                if user:
+                    emb = embeds.weekly_summary_embed(week_matches, wins, losses, standing)
+                    emb.title = (emb.title or "Podsumowanie tygodnia") + " · DM kapitana"
+                    # frekwencja z lineupów z tygodnia
+                    freq: dict[int, int] = {}
+                    for m in week_matches:
+                        mid = m.get("id")
+                        if mid is None:
+                            continue
+                        try:
+                            ids = json.loads(db.get_config(f"lineup_{mid}") or "[]")
+                            for uid in ids:
+                                freq[int(uid)] = freq.get(int(uid), 0) + 1
+                        except Exception:
+                            pass
+                    if freq:
+                        lines = [f"<@{u}> · {c}×" for u, c in sorted(freq.items(), key=lambda x: -x[1])[:15]]
+                        emb.add_field(name="Frekwencja (skład)", value="\n".join(lines), inline=False)
+                    await user.send(embed=emb)
+                    print(f"[weekly] DM do kapitana {cid}")
+        except Exception as e:
+            print(f"[weekly] DM kapitana: {e}")
 
     @weekly_summary.before_loop
     async def before_weekly(self):
@@ -3177,6 +3451,58 @@ async def cmd_trening(
     asyncio.create_task(_schedule_training_close(pid, closes_at))
     await interaction.followup.send(
         f"✅ Ankieta treningu **#{pid}** na {channel.mention} · zamykam <t:{closes_at}:R> ({godziny} h)",
+        ephemeral=True,
+    )
+
+
+
+@bot.tree.command(name="zaplanuj", description="Zaplanuj wiadomość na kanał (sztab)")
+@app_commands.describe(
+    data="Data YYYY-MM-DD",
+    godzina="Godzina HH:MM (Europe/Warsaw)",
+    tresc="Treść wiadomości",
+    kanal="Kanał (domyślnie bieżący)",
+    ping_roli="Opcjonalnie rola do wspomnia",
+)
+async def cmd_zaplanuj(
+    interaction: discord.Interaction,
+    data: str,
+    godzina: str,
+    tresc: str,
+    kanal: Optional[discord.TextChannel] = None,
+    ping_roli: Optional[discord.Role] = None,
+):
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko właściciel, kapitan lub vicekapitan.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        await interaction.response.send_message("Użyj na serwerze.", ephemeral=True)
+        return
+    try:
+        dt = datetime.strptime(f"{data.strip()} {godzina.strip()}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+    except ValueError:
+        await interaction.response.send_message("Zły format. Data: `YYYY-MM-DD`, godzina: `HH:MM`.", ephemeral=True)
+        return
+    if dt.timestamp() < datetime.now(TZ).timestamp() - 30:
+        await interaction.response.send_message("Termin jest w przeszłości.", ephemeral=True)
+        return
+    ch = kanal or interaction.channel
+    if not isinstance(ch, discord.TextChannel):
+        await interaction.response.send_message("Wybierz kanał tekstowy.", ephemeral=True)
+        return
+    sid = _next_sched_id()
+    payload = {
+        "id": sid,
+        "when": int(dt.timestamp()),
+        "channel_id": ch.id,
+        "content": tresc.strip()[:1900],
+        "ping": ping_roli.mention if ping_roli else "",
+        "sent": False,
+        "by": interaction.user.id,
+    }
+    _save_sched(sid, payload)
+    await interaction.response.send_message(
+        f"✅ Zaplanowano **#{sid}** na {ch.mention} · <t:{int(dt.timestamp())}:F> (<t:{int(dt.timestamp())}:R>)",
         ephemeral=True,
     )
 
