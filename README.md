@@ -1,4 +1,4 @@
-> **Wersja bota: `1.5.10`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.5.11`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -13,21 +13,20 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 - Terminarz i wyniki – **edycja** wiadomości zamiast spamu
 - **LIVE** co **5 s** (mecz) / **10 s** (brak)
 - Soft-start **~90 s** + wiadomość startowa z postępem
-- **Panele UI**: `/sklad`, `/setup-all`, `/polacz`, `/ankieta-role`, `/gif-lista`, `/panel`, `/ustawienia`
-- **Wiele nazwanych składów** + zapis na mecz + DM Gram/Nie mogę
-- **Sztab**: kapitan i vicekapitan
+- **Panele UI**, wiele składów, DM Gram/Nie mogę
+- **Sztab**: kapitan, vicekapitan, **coach**
 - **`/trening`** – ankieta terminu z auto-zamknięciem
-- **`/zaplanuj`** – zaplanowana wiadomość (data + godzina + kanał)
-- **Ciche godziny** (23–8) – w nocy tylko LIVE (`/ustawienia`)
-- **MVP po meczu** – głosowanie 1 z 5 (auto, bez komendy)
-- **Tygodniówka w DM kapitana** – wyniki + frekwencja (niedziela)
-- Alert **zmiany terminu** meczu
-- Link do meczu na StarterLeague w embedach
+- **`/zaplanuj`** – zaplanowana wiadomość · **`/zaplanuj-lista`**
+- **Ciche godziny** (23–8) – w nocy tylko LIVE
+- **MVP po meczu** – głosowanie 1 z 5
+- **Tygodniówka w DM kapitana**
+- Alert zmiany terminu, linki do meczów na StarterLeague
 - Komendy w **DM**: `/panel`, `/sklad-status`, `/ping-sklad`, `/moj-status`, `/pomoc`
-- Update wersji z GitHuba **co 1 h**
 
-### Hotfix 1.5.10
-Naprawiono crash startu: `AttributeError: 'function' object has no attribute 'before_loop'` (dekorator `@tasks.loop` na `weekly_summary`).
+### 1.5.11
+- `/coach` – rola coacha w sztabie
+- Poprawione `/zaplanuj` (format daty/godziny, zapis, wysyłka)
+- `/zaplanuj-lista` – podgląd zaplanowanych wiadomości
 
 ---
 
@@ -35,10 +34,7 @@ Naprawiono crash startu: `AttributeError: 'function' object has no attribute 'be
 
 | Czas | Co |
 |------|-----|
-| 4 s | LIVE |
-| 8 s | Prematch |
-| 12 s | Daily |
-| 16 s | Komendy + sync |
+| 4–16 s | LIVE → prematch → daily → komendy |
 | 20–60 s | Tabela, status, ankiety, API, eventy |
 | 70–90 s | Cleanup, update, zaplanowane, weekly |
 
@@ -46,32 +42,27 @@ Naprawiono crash startu: `AttributeError: 'function' object has no attribute 'be
 
 ## Sztab
 
-| Rola | Uprawnienia |
-|------|-------------|
-| **Właściciel** | wszystko |
-| **Kapitan** | skład, panel, polacz, ping, ankiety, trening, zaplanuj, vice |
-| **Vicekapitan** | jak kapitan, bez ustawiania vice |
+| Rola | Kto ustawia | Uprawnienia |
+|------|-------------|-------------|
+| **Właściciel** | — | wszystko |
+| **Kapitan** | `/kapitan` | sztab + `/vicekapitan` + `/coach` |
+| **Vicekapitan** | `/vicekapitan` | sztab (bez ustawiania ról) |
+| **Coach** | `/coach` | sztab (bez ustawiania ról) |
+
+Sztab: `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj`
 
 ---
 
 ## Komendy
 
 **Wszyscy:** `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` `/status` `/wersja` `/pomoc` `/gracze` `/moj-status` `/sztab`  
-**Sztab:** `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj` `/vicekapitan`  
+**Sztab:** `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj` `/zaplanuj-lista`  
+**Kapitan+:** `/vicekapitan` `/coach`  
 **Właściciel:** `/setup*` `/ustawienia` `/gif-*` `/pokaz-embedy` `/kapitan`
 
----
-
-## Harmonogram
-
-| Co | Kiedy |
-|----|-------|
-| LIVE | 5 s / 10 s |
-| Prematch / Daily | poza cichymi godzinami |
-| Tabela | 08:00, 18:00, 20:00, 21:30, 23:00 |
-| Weekly + DM kapitana | niedziela 20:00 |
-| Zaplanowane | co 30 s |
-| Update GitHub | co 1 h |
+### `/zaplanuj`
+`data:` YYYY-MM-DD · `godzina:` HH:MM · `tresc:` · opcjonalnie `kanal:` i `ping_roli:`  
+Lista: `/zaplanuj-lista`
 
 ---
 
