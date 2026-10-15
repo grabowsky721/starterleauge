@@ -1,4 +1,4 @@
-> **Wersja bota: `1.5.11`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.5.12`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -10,59 +10,28 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 ## Funkcje
 
-- Terminarz i wyniki – **edycja** wiadomości zamiast spamu
-- **LIVE** co **5 s** (mecz) / **10 s** (brak)
-- Soft-start **~90 s** + wiadomość startowa z postępem
-- **Panele UI**, wiele składów, DM Gram/Nie mogę
-- **Sztab**: kapitan, vicekapitan, **coach**
-- **`/trening`** – ankieta terminu z auto-zamknięciem
-- **`/zaplanuj`** – zaplanowana wiadomość · **`/zaplanuj-lista`**
-- **Ciche godziny** (23–8) – w nocy tylko LIVE
-- **MVP po meczu** – głosowanie 1 z 5
-- **Tygodniówka w DM kapitana**
-- Alert zmiany terminu, linki do meczów na StarterLeague
-- Komendy w **DM**: `/panel`, `/sklad-status`, `/ping-sklad`, `/moj-status`, `/pomoc`
+- Terminarz, wyniki, LIVE, soft-start ~90 s
+- Sztab: kapitan, vice, **coach** (`/coach`)
+- **`/zaplanuj`** + **`/zaplanuj-lista`**
+- `/trening`, MVP, ciche godziny, tygodniówka DM kapitana
+- Panele UI, wiele składów, linki do meczów
+
+### 1.5.12
+Sync slash-komend: najpierw global, potem **`copy_global_to` na serwer** – komendy (m.in. `/zaplanuj`, `/coach`) pojawiają się od razu, bez czekania na propagację Discorda.
 
 ### 1.5.11
-- `/coach` – rola coacha w sztabie
-- Poprawione `/zaplanuj` (format daty/godziny, zapis, wysyłka)
-- `/zaplanuj-lista` – podgląd zaplanowanych wiadomości
+`/coach`, poprawka `/zaplanuj`, `/zaplanuj-lista`
 
 ---
 
-## Soft-start (~90 s)
-
-| Czas | Co |
-|------|-----|
-| 4–16 s | LIVE → prematch → daily → komendy |
-| 20–60 s | Tabela, status, ankiety, API, eventy |
-| 70–90 s | Cleanup, update, zaplanowane, weekly |
-
----
-
-## Sztab
-
-| Rola | Kto ustawia | Uprawnienia |
-|------|-------------|-------------|
-| **Właściciel** | — | wszystko |
-| **Kapitan** | `/kapitan` | sztab + `/vicekapitan` + `/coach` |
-| **Vicekapitan** | `/vicekapitan` | sztab (bez ustawiania ról) |
-| **Coach** | `/coach` | sztab (bez ustawiania ról) |
-
-Sztab: `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj`
-
----
-
-## Komendy
+## Komendy (skrót)
 
 **Wszyscy:** `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` `/status` `/wersja` `/pomoc` `/gracze` `/moj-status` `/sztab`  
 **Sztab:** `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj` `/zaplanuj-lista`  
 **Kapitan+:** `/vicekapitan` `/coach`  
-**Właściciel:** `/setup*` `/ustawienia` `/gif-*` `/pokaz-embedy` `/kapitan`
+**Właściciel:** `/setup*` `/ustawienia` `/gif-*` `/kapitan`
 
-### `/zaplanuj`
-`data:` YYYY-MM-DD · `godzina:` HH:MM · `tresc:` · opcjonalnie `kanal:` i `ping_roli:`  
-Lista: `/zaplanuj-lista`
+`/zaplanuj` – `data:` YYYY-MM-DD · `godzina:` HH:MM · `tresc:` · opcjonalnie kanał i rola
 
 ---
 
@@ -71,13 +40,9 @@ Lista: `/zaplanuj-lista`
 | Pole | Wartość |
 |------|---------|
 | Git Repo | `https://github.com/grabowsky721/starterleauge` |
-| Branch | `main` |
-| Auto Update | `1` |
 | Bot py file | `src/bot.py` |
-| Requirements | `requirements.txt` |
+| Auto Update | `1` |
 
 Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
 
----
-
-Team ID: **869**. Wersja: zgodne `VERSION` + README + `/wersja`.
+Team ID: **869**.
