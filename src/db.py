@@ -1,6 +1,7 @@
 """Minimalna baza SQLite do śledzenia meczów i wiadomości Discord."""
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,6 +52,11 @@ def init_db() -> None:
             );
             """
         )
+        # migracja: znacznik ostatniej zmiany klucza (potrzebny do sprzątania starych kluczy)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(config)")]
+        if "updated_at" not in cols:
+            conn.execute("ALTER TABLE config ADD COLUMN updated_at TEXT")
+            conn.execute("UPDATE config SET updated_at = ?", (datetime.utcnow().isoformat(),))
 
 
 def get_config(key: str, default: str | None = None) -> str | None:
@@ -75,9 +81,9 @@ def set_config(key: str, value: str | None) -> None:
             conn.execute("DELETE FROM config WHERE key = ?", (key,))
         else:
             conn.execute(
-                "INSERT INTO config(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, str(value)),
+                "INSERT INTO config(key, value, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (key, str(value), datetime.utcnow().isoformat()),
             )
 
 
@@ -142,3 +148,14 @@ def cleanup_old(days: int = 30) -> int:
             (cutoff,),
         )
         return cur.rowcount
+
+
+def cleanup_config(prefixes: tuple[str, ...], days: int = 60) -> int:
+    """Usuwa klucze „prefiks + numer meczu”, których nikt nie zmieniał od `days` dni."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    rx = re.compile("^(?:" + "|".join(re.escape(p) for p in prefixes) + r")\d+$")
+    with _connect() as conn:
+        rows = conn.execute("SELECT key FROM config WHERE updated_at IS NOT NULL AND updated_at < ?", (cutoff,)).fetchall()
+        keys = [r["key"] for r in rows if rx.match(r["key"])]
+        conn.executemany("DELETE FROM config WHERE key = ?", [(k,) for k in keys])
+        return len(keys)
