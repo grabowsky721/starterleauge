@@ -1,4 +1,4 @@
-> **Wersja bota: `1.5.19`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.0`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -20,14 +20,8 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 - Rola **aktywnego składu** przy zapisie składu, zdjęcie po meczu
 - `/zaplanuj`, MVP, ciche godziny, panele UI, wiele składów
 
-### 1.5.19
-Szablony ogłoszeń + ocena treningu 1–5 (podsumowanie tylko dla sztabu).
-
-### 1.5.18
-Rola aktywnego składu (`/setup-rola-sklad`).
-
-### 1.5.17
-Stabilność: soft-start, LIVE lock, helpery log/cfg/api.
+### 1.6.0
+Wersja zbiorcza po cyklu 1.5.x (trening, szablony, rola składu, stabilność, kanały).
 
 ---
 
@@ -53,21 +47,13 @@ Stabilność: soft-start, LIVE lock, helpery log/cfg/api.
 | Kapitan | sztab + vice + coach |
 | Vice / Coach | sztab |
 
-Sztab: skład, panel, trening, zaplanuj, ogloszenie, szablony…
-
 ---
 
 ## Komendy (skrót)
 
 **Wszyscy:** `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` `/status` `/wersja` `/pomoc` `/gracze` `/moj-status` `/sztab` `/szablon-lista`  
-**Sztab:** `/sklad` `/panel` `/trening` `/ogloszenie` `/szablon-dodaj` `/szablon-usun` `/zaplanuj` `/zaplanuj-lista` …  
+**Sztab:** `/sklad` `/panel` `/trening` `/ogloszenie` `/szablon-*` `/zaplanuj` …  
 **Właściciel:** `/setup*` `/ustawienia` `/kapitan` `/setup-rola-sklad`
-
-### Szablony
-`/szablon-dodaj nazwa:scrim tresc:…` → `/ogloszenie szablon:scrim`
-
-### Trening
-`/trening` → wybór dni → głosy → godziny → wydarzenie → ocena 1–5 na kanale ankiet.
 
 ---
 
