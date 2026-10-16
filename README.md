@@ -1,4 +1,4 @@
-> **Wersja bota: `1.5.17`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.5.19`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -11,68 +11,63 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 ## Funkcje
 
 - Terminarz i wyniki – **edycja** wiadomości zamiast spamu
-- **LIVE** co **5 s** (mecz) / **10 s** (brak), bez nachodzących przebiegów (lock)
-- Soft-start **~90 s** – błąd jednego kroku nie zatrzymuje reszty
-- **Sync komend na serwer** (`copy_global_to`) – slash-e od razu widoczne
-- **Sztab**: kapitan, vicekapitan, coach
-- **`/trening`**: dni → godziny → wydarzenie Discord + ogłoszenie
-- Ankiety na kanale **ankiet** (`/setup-ankiety`)
-- Ogłoszenia treningów na kanale **ogłoszeń** (`/setup-ogloszenia`)
-- **`/zaplanuj`**, **`/zaplanuj-lista`**, **`/ogloszenie`**
-- MVP po meczu, ciche godziny, tygodniówka DM kapitana
-- Panele UI, wiele składów, linki do meczów
+- **LIVE** (5 s / 10 s) + lock przebiegów
+- Soft-start **~90 s**, sync slash na guild od razu
+- **Sztab**: kapitan, vice, coach
+- **`/trening`**: dni → godziny → wydarzenie + **ocena 1–5** (wyniki tylko sztab)
+- Ankiety → kanał ankiet · ogłoszenia treningów → kanał ogłoszeń
+- **Szablony ogłoszeń**: `/szablon-dodaj` · `/ogloszenie szablon:`
+- Rola **aktywnego składu** przy zapisie składu, zdjęcie po meczu
+- `/zaplanuj`, MVP, ciche godziny, panele UI, wiele składów
+
+### 1.5.19
+Szablony ogłoszeń + ocena treningu 1–5 (podsumowanie tylko dla sztabu).
+
+### 1.5.18
+Rola aktywnego składu (`/setup-rola-sklad`).
 
 ### 1.5.17
-Stabilność: odporny soft-start, twardsze `_edit_or_send`, lock LIVE, helpery `log` / `cfg_json` / `safe_ephemeral` / `api_call`.
-
-### 1.5.16
-Ankiety (w tym trening) tylko na kanale ankiet.
-
-### 1.5.15
-Kanał ogłoszeń tylko pod treningi.
-
----
-
-## Soft-start (~90 s)
-
-| Czas | Co |
-|------|-----|
-| 4–16 s | LIVE → prematch → daily → komendy + sync |
-| 20–60 s | Tabela, status, ankiety, API, eventy |
-| 70–90 s | Cleanup, update, zaplanowane, weekly |
+Stabilność: soft-start, LIVE lock, helpery log/cfg/api.
 
 ---
 
 ## Kanały
 
-| Setup | Przeznaczenie |
-|-------|----------------|
-| `/setup` | Główny – wyniki, nadchodzące, prematch |
+| Komenda | Kanał |
+|---------|--------|
+| `/setup` | Główny (wyniki, nadchodzące, prematch) |
 | `/setup-live` | LIVE |
 | `/setup-tabela` | Tabela |
-| `/setup-ankiety` | Ankiety (dostępność + trening) |
-| `/setup-ogloszenia` | Tylko ogłoszenia treningów |
-| `/setup-all` | Panel wszystkich kanałów |
+| `/setup-ankiety` | Ankiety + ocena treningu |
+| `/setup-ogloszenia` | Ogłoszenia treningów |
+| `/setup-rola-sklad` | Rola przy składzie na mecz |
+| `/setup-all` | Panel kanałów |
 
 ---
 
 ## Sztab
 
-| Rola | Kto ustawia | Uprawnienia |
-|------|-------------|-------------|
-| **Właściciel** | — | wszystko |
-| **Kapitan** | `/kapitan` | sztab + `/vicekapitan` + `/coach` |
-| **Vicekapitan** | `/vicekapitan` | sztab |
-| **Coach** | `/coach` | sztab |
+| Rola | Uprawnienia |
+|------|-------------|
+| Właściciel | wszystko + setup |
+| Kapitan | sztab + vice + coach |
+| Vice / Coach | sztab |
+
+Sztab: skład, panel, trening, zaplanuj, ogloszenie, szablony…
 
 ---
 
 ## Komendy (skrót)
 
-**Wszyscy:** `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` `/status` `/wersja` `/pomoc` `/gracze` `/moj-status` `/sztab`  
-**Sztab:** `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj` `/zaplanuj-lista` `/ogloszenie`  
-**Kapitan+:** `/vicekapitan` `/coach`  
-**Właściciel:** `/setup*` `/ustawienia` `/gif-*` `/pokaz-embedy` `/kapitan`
+**Wszyscy:** `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` `/status` `/wersja` `/pomoc` `/gracze` `/moj-status` `/sztab` `/szablon-lista`  
+**Sztab:** `/sklad` `/panel` `/trening` `/ogloszenie` `/szablon-dodaj` `/szablon-usun` `/zaplanuj` `/zaplanuj-lista` …  
+**Właściciel:** `/setup*` `/ustawienia` `/kapitan` `/setup-rola-sklad`
+
+### Szablony
+`/szablon-dodaj nazwa:scrim tresc:…` → `/ogloszenie szablon:scrim`
+
+### Trening
+`/trening` → wybór dni → głosy → godziny → wydarzenie → ocena 1–5 na kanale ankiet.
 
 ---
 
@@ -88,6 +83,4 @@ Kanał ogłoszeń tylko pod treningi.
 
 Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
 
----
-
-Team ID: **869**. Wersja: zgodne `VERSION` + README + `/wersja`.
+Team ID: **869**.
