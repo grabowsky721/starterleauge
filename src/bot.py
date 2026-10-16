@@ -80,6 +80,7 @@ COMMAND_START_ORDER = [
     "setup-live",
     "setup-tabela",
     "setup-ankiety",
+    "setup-rola-sklad",
     "setup-ogloszenia",
     "setup-all",
     "status",
@@ -107,6 +108,9 @@ COMMAND_START_ORDER = [
     "sztab",
     "trening",
     "ogloszenie",
+    "szablon-usun",
+    "szablon-lista",
+    "szablon-dodaj",
     "zaplanuj",
     "zaplanuj-lista",
     "coach",
@@ -221,6 +225,23 @@ def cfg_json_list(key: str) -> list:
 def cfg_json_dict(key: str) -> dict:
     v = cfg_json(key, {})
     return v if isinstance(v, dict) else {}
+
+
+def active_lineup_role_id() -> int | None:
+    return db.get_config_int("active_lineup_role_id")
+
+
+def announce_templates() -> dict[str, str]:
+    """Szablony ogłoszeń: nazwa → treść."""
+    d = cfg_json_dict("announce_templates")
+    return {str(k): str(v) for k, v in d.items() if str(v).strip()}
+
+
+def save_announce_templates(data: dict[str, str]) -> None:
+    db.set_config("announce_templates", json.dumps(data, ensure_ascii=False))
+
+
+
 
 
 async def safe_ephemeral(interaction: discord.Interaction, content: str = None, **kwargs) -> None:
@@ -630,6 +651,82 @@ class TreningStaffButton(discord.ui.DynamicItem[discord.ui.Button], template=r"p
             await bot._trening_create_event(interaction, self.pid, data)
 
 
+
+class TreningRateButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_trate:(?P<pid>\d+):(?P<score>[1-5])"):
+    def __init__(self, pid: int, score: int):
+        super().__init__(
+            discord.ui.Button(
+                label=str(score),
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"pindolz_trate:{pid}:{score}",
+            )
+        )
+        self.pid = pid
+        self.score = score
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["pid"]), int(match["score"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        data = _load_training(self.pid) or {}
+        rates = data.setdefault("ratings", {})
+        rates[str(interaction.user.id)] = self.score
+        data["ratings"] = rates
+        _save_training(self.pid, data)
+        await interaction.response.send_message(
+            f"Twoja ocena treningu: **{self.score}/5** (możesz zmienić klikając ponownie).",
+            ephemeral=True,
+        )
+
+
+class TreningRateStaffButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_trate_staff:(?P<pid>\d+)"):
+    def __init__(self, pid: int):
+        super().__init__(
+            discord.ui.Button(
+                label="Wyniki (sztab)",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"pindolz_trate_staff:{pid}",
+            )
+        )
+        self.pid = pid
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(int(match["pid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not bot.is_staff(interaction):
+            await interaction.response.send_message("Tylko sztab widzi wyniki.", ephemeral=True)
+            return
+        data = _load_training(self.pid) or {}
+        rates = data.get("ratings") or {}
+        if not rates:
+            await interaction.response.send_message("Brak ocen.", ephemeral=True)
+            return
+        scores = [int(v) for v in rates.values() if str(v).isdigit()]
+        avg = sum(scores) / len(scores) if scores else 0
+        dist = {i: 0 for i in range(1, 6)}
+        for s in scores:
+            if 1 <= s <= 5:
+                dist[s] += 1
+        lines = [f"**{i}/5** — {dist[i]}×" for i in range(1, 6)]
+        emb = discord.Embed(
+            title=f"⭐ Ocena treningu #{self.pid}",
+            description=f"Średnia: **{avg:.2f}/5** · głosów: **{len(scores)}**\n\n" + "\n".join(lines),
+            color=0xF1C40F,
+        )
+        await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+def training_rate_view(pid: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    for s in range(1, 6):
+        view.add_item(TreningRateButton(pid, s))
+    view.add_item(TreningRateStaffButton(pid))
+    return view
+
+
 class TreningSetupView(discord.ui.View):
     """Ephemeral: wybór dni tygodnia i publikacja ankiety."""
 
@@ -986,8 +1083,15 @@ class SkladBtnSaveMatch(discord.ui.Button):
         ids = self.panel._persist_match()
         emb = embeds.lineup_embed(self.panel.match, ids, _player_nicks())
         await interaction.edit_original_response(embed=emb, view=self.panel)
+        role_note = ""
+        try:
+            a, r = await bot.sync_active_lineup_roles(interaction.guild, ids, mid=self.panel.mid)
+            if active_lineup_role_id():
+                role_note = f" · rola składu: +{a}/−{r}"
+        except Exception as e:
+            log("sklad-rola", f"save: {e}")
         await interaction.followup.send(
-            f"✅ Skład na mecz zapisany ({len(ids)} os.): " + ", ".join(f"<@{i}>" for i in ids),
+            f"✅ Skład na mecz zapisany ({len(ids)} os.): " + ", ".join(f"<@{i}>" for i in ids) + role_note,
             ephemeral=True,
         )
         try:
@@ -1007,6 +1111,10 @@ class SkladBtnSaveDm(discord.ui.Button):
             return
         await interaction.response.defer(ephemeral=True)
         ids = self.panel._persist_match()
+        try:
+            await bot.sync_active_lineup_roles(interaction.guild, ids, mid=self.panel.mid)
+        except Exception as e:
+            log("sklad-rola", f"save+dm: {e}")
         emb = embeds.lineup_embed(self.panel.match, ids, _player_nicks())
         await interaction.edit_original_response(embed=emb, view=self.panel)
         dm_ok, dm_fail = await _sklad_send_confirmation_dms(self.panel.match, self.panel.mid, ids)
@@ -1486,7 +1594,7 @@ class PindolzBot(commands.Bot):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         try:
-            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, TreningStaffButton, MvpButton)
+            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, TreningStaffButton, TreningRateButton, TreningRateStaffButton, MvpButton)
         except Exception as e:
             print(f"[start] dynamic items: {e}")
         asyncio.create_task(self._soft_start_tasks())
@@ -1982,6 +2090,10 @@ class PindolzBot(commands.Bot):
             await self._post_win_gif(ch_id, m)
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             await self._start_mvp_vote(channel, m)
+            try:
+                await self.clear_active_lineup_roles(getattr(channel, "guild", None), mid=mid)
+            except Exception as e:
+                log("sklad-rola", f"po meczu: {e}")
             if row and row.get("msg_live_id"):
                 try:
                     live_ch = await self.get_channel_safe(row.get("msg_live_ch"))
@@ -2521,8 +2633,110 @@ class PindolzBot(commands.Bot):
         except Exception:
             pass
         await self.send_announcement(announce, fallback_channel=ch)
+        # Ocena treningu 1–5 (wyniki tylko dla sztabu)
+        try:
+            rate_ch = await self.get_channel_safe(db.get_config_int("poll_channel_id"))
+            if not rate_ch:
+                rate_ch = ch
+            if rate_ch:
+                remb = discord.Embed(
+                    title="⭐ Oceń trening",
+                    description=(
+                        f"{day_label} · {hour_s}\n"
+                        f"Kliknij ocenę **1–5**. Wyniki widzi tylko sztab."
+                    ),
+                    color=0xF1C40F,
+                )
+                rmsg = await rate_ch.send(embed=remb, view=training_rate_view(pid))
+                data["rate_message_id"] = rmsg.id
+                data["rate_channel_id"] = rate_ch.id
+                data["ratings"] = data.get("ratings") or {}
+                _save_training(pid, data)
+        except Exception as e:
+            log("trening", f"ocena: {e}")
         await interaction.followup.send(f"✅ Wydarzenie utworzone.\n{result}", ephemeral=True)
         print(f"[trening] event #{pid} {day_label} {hour_s} ts={start_dt}")
+
+
+    async def sync_active_lineup_roles(self, guild: discord.Guild | None, member_ids: list[int], *, mid: int | None = None) -> tuple[int, int]:
+        """Nadaje rolę aktywnego składu wybranym; zdejmuje z poprzedniego składu.
+        Zwraca (nadano, zdjęto)."""
+        role_id = active_lineup_role_id()
+        if not guild or not role_id:
+            return 0, 0
+        role = guild.get_role(int(role_id))
+        if not role:
+            log("sklad-rola", f"brak roli {role_id}")
+            return 0, 0
+        want = set(int(x) for x in member_ids)
+        prev_mid = db.get_config_int("active_lineup_mid")
+        prev_ids: set[int] = set()
+        if prev_mid:
+            try:
+                prev_ids = {int(x) for x in json.loads(db.get_config(f"lineup_{prev_mid}") or "[]")}
+            except Exception:
+                prev_ids = set()
+        # also anyone currently with the role who shouldn't keep it
+        to_remove = (prev_ids - want) if prev_ids else set()
+        added = removed = 0
+        for uid in to_remove:
+            try:
+                member = guild.get_member(uid) or await guild.fetch_member(uid)
+                if member and role in member.roles:
+                    await member.remove_roles(role, reason="Zmiana składu meczowego")
+                    removed += 1
+            except Exception as e:
+                log("sklad-rola", f"remove {uid}: {e}")
+        for uid in want:
+            try:
+                member = guild.get_member(uid) or await guild.fetch_member(uid)
+                if member and role not in member.roles:
+                    await member.add_roles(role, reason="Skład na mecz")
+                    added += 1
+            except Exception as e:
+                log("sklad-rola", f"add {uid}: {e}")
+        if mid is not None:
+            db.set_config("active_lineup_mid", str(mid))
+        log("sklad-rola", f"mid={mid} +{added} -{removed}")
+        return added, removed
+
+    async def clear_active_lineup_roles(self, guild: discord.Guild | None = None, mid: int | None = None) -> int:
+        """Zdejmuje rolę aktywnego składu po meczu."""
+        role_id = active_lineup_role_id()
+        if not role_id:
+            return 0
+        active_mid = mid or db.get_config_int("active_lineup_mid")
+        ids: list[int] = []
+        if active_mid:
+            try:
+                ids = [int(x) for x in json.loads(db.get_config(f"lineup_{active_mid}") or "[]")]
+            except Exception:
+                ids = []
+        if not guild and active_mid:
+            # spróbuj z main channel
+            ch = await self.get_channel_safe(self._main_channel_id())
+            guild = getattr(ch, "guild", None) if ch else None
+        if not guild:
+            for g in self.guilds:
+                guild = g
+                break
+        if not guild:
+            return 0
+        role = guild.get_role(int(role_id))
+        if not role:
+            return 0
+        removed = 0
+        for uid in ids:
+            try:
+                member = guild.get_member(uid) or await guild.fetch_member(uid)
+                if member and role in member.roles:
+                    await member.remove_roles(role, reason="Koniec meczu – zdjęcie aktywnego składu")
+                    removed += 1
+            except Exception as e:
+                log("sklad-rola", f"clear {uid}: {e}")
+        db.set_config("active_lineup_mid", None)
+        log("sklad-rola", f"wyczyszczono mid={active_mid} -{removed}")
+        return removed
 
     @tasks.loop(time=time(20, 0, tzinfo=TZ))
     @guarded
@@ -3451,6 +3665,29 @@ async def cmd_setup_ankiety(interaction: discord.Interaction, kanal: discord.Tex
 
 
 
+
+@bot.tree.command(name="setup-rola-sklad", description="Ustaw rolę nadawaną aktywnemu składowi (właściciel)")
+@app_commands.describe(rola="Rola dla graczy w składzie na mecz (puste = wyłącz)")
+async def cmd_setup_rola_sklad(interaction: discord.Interaction, rola: Optional[discord.Role] = None):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    if rola is None:
+        db.set_config("active_lineup_role_id", None)
+        await interaction.response.send_message("Rola aktywnego składu **wyłączona**.", ephemeral=True)
+        return
+    if rola.is_default() or rola.managed:
+        await interaction.response.send_message("Wybierz zwykłą rolę serwera (nie @everyone / nie role bota).", ephemeral=True)
+        return
+    db.set_config("active_lineup_role_id", str(rola.id))
+    await interaction.response.send_message(
+        f"Rola aktywnego składu: {rola.mention}\n"
+        f"Nadawana przy **Zapisz na mecz** / **Zapisz + DM**, zdejmowana po wyniku meczu.\n"
+        f"Upewnij się, że rola bota jest **wyżej** na liście ról niż ta rola.",
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="setup-ogloszenia", description="Ustaw kanał ogłoszeń (właściciel)")
 @app_commands.describe(kanal="Kanał na ogłoszenia treningów")
 async def cmd_setup_ogloszenia(interaction: discord.Interaction, kanal: discord.TextChannel):
@@ -3815,33 +4052,116 @@ async def cmd_trening(interaction: discord.Interaction):
 
 
 
-@bot.tree.command(name="ogloszenie", description="Wyślij ogłoszenie na kanał ogłoszeń (sztab)")
-@app_commands.describe(tresc="Treść ogłoszenia", ping_roli="Opcjonalny ping roli")
+@bot.tree.command(name="ogloszenie", description="Wyślij ogłoszenie (sztab) – treść lub szablon")
+@app_commands.describe(
+    tresc="Treść (opcjonalnie, jeśli używasz szablonu)",
+    szablon="Nazwa zapisanego szablonu",
+    ping_roli="Opcjonalny ping roli",
+)
 async def cmd_ogloszenie(
     interaction: discord.Interaction,
-    tresc: str,
+    tresc: Optional[str] = None,
+    szablon: Optional[str] = None,
     ping_roli: Optional[discord.Role] = None,
 ):
     if not bot.is_staff(interaction):
         await interaction.response.send_message("Tylko sztab.", ephemeral=True)
         return
     text = (tresc or "").strip()
+    tpl_name = (szablon or "").strip()
+    if tpl_name:
+        tpls = announce_templates()
+        # case-insensitive match
+        key = next((k for k in tpls if k.lower() == tpl_name.lower()), None)
+        if not key:
+            await interaction.response.send_message(
+                f"Brak szablonu `{tpl_name}`. Lista: `/szablon-lista`",
+                ephemeral=True,
+            )
+            return
+        text = tpls[key]
     if not text:
-        await interaction.response.send_message("Pusta treść.", ephemeral=True)
+        await interaction.response.send_message(
+            "Podaj `tresc:` albo `szablon:`. Szablony: `/szablon-lista`",
+            ephemeral=True,
+        )
         return
     emb = discord.Embed(title="📢 Ogłoszenie", description=text[:4000], color=0x5865F2)
-    emb.set_footer(text=f"Od {interaction.user.display_name}")
+    if tpl_name:
+        emb.set_footer(text=f"Szablon: {tpl_name} · od {interaction.user.display_name}")
+    else:
+        emb.set_footer(text=f"Od {interaction.user.display_name}")
     msg = await bot.send_announcement(
         content=ping_roli.mention if ping_roli else None,
         embed=emb,
     )
     if not msg:
         await interaction.response.send_message(
-            "Brak kanału ogłoszeń. Ustaw: `/setup-ogloszenia` lub `/setup-all`.",
+            "Brak kanału ogłoszeń. Ustaw: `/setup-ogloszenia`.",
             ephemeral=True,
         )
         return
     await interaction.response.send_message(f"✅ Wysłano na {msg.channel.mention}", ephemeral=True)
+
+
+
+@cmd_ogloszenie.autocomplete("szablon")
+async def ogloszenie_szablon_autocomplete(interaction: discord.Interaction, current: str):
+    tpls = announce_templates()
+    cur = (current or "").lower()
+    names = [n for n in tpls if cur in n.lower()][:25]
+    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names]
+
+
+@bot.tree.command(name="szablon-dodaj", description="Zapisz szablon ogłoszenia (sztab)")
+@app_commands.describe(nazwa="Krótka nazwa (np. scrim, trening, info)", tresc="Treść szablonu")
+async def cmd_szablon_dodaj(interaction: discord.Interaction, nazwa: str, tresc: str):
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko sztab.", ephemeral=True)
+        return
+    name = (nazwa or "").strip()[:40]
+    body = (tresc or "").strip()[:1900]
+    if not name or not body:
+        await interaction.response.send_message("Podaj nazwę i treść.", ephemeral=True)
+        return
+    tpls = announce_templates()
+    tpls[name] = body
+    save_announce_templates(tpls)
+    await interaction.response.send_message(
+        f"✅ Szablon **{name}** zapisany. Użycie: `/ogloszenie szablon:{name}`",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="szablon-lista", description="Lista szablonów ogłoszeń")
+async def cmd_szablon_lista(interaction: discord.Interaction):
+    tpls = announce_templates()
+    if not tpls:
+        await interaction.response.send_message(
+            "Brak szablonów. Dodaj: `/szablon-dodaj`.",
+            ephemeral=True,
+        )
+        return
+    lines = [f"**{n}** — {t[:80]}{'…' if len(t) > 80 else ''}" for n, t in sorted(tpls.items())]
+    emb = discord.Embed(title="📋 Szablony ogłoszeń", description="\n".join(lines)[:4000], color=0x5865F2)
+    emb.set_footer(text="/ogloszenie szablon:nazwa · /szablon-usun")
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+@bot.tree.command(name="szablon-usun", description="Usuń szablon ogłoszenia (sztab)")
+@app_commands.describe(nazwa="Nazwa szablonu")
+async def cmd_szablon_usun(interaction: discord.Interaction, nazwa: str):
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko sztab.", ephemeral=True)
+        return
+    tpls = announce_templates()
+    key = next((k for k in tpls if k.lower() == (nazwa or "").strip().lower()), None)
+    if not key:
+        await interaction.response.send_message("Nie ma takiego szablonu.", ephemeral=True)
+        return
+    del tpls[key]
+    save_announce_templates(tpls)
+    await interaction.response.send_message(f"Usunięto szablon **{key}**.", ephemeral=True)
 
 
 @bot.tree.command(name="zaplanuj", description="Zaplanuj wiadomość na kanał (sztab)")
