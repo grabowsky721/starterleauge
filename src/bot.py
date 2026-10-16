@@ -195,6 +195,46 @@ def feature_on(name: str) -> bool:
     return db.get_config(f"feat_{name}") != "0"
 
 
+def log(tag: str, msg: str) -> None:
+    """Jednolity log do konsoli GameHost."""
+    print(f"[{tag}] {msg}")
+
+
+def cfg_json(key: str, default=None):
+    """Bezpieczny odczyt JSON z configu."""
+    if default is None:
+        default = None
+    try:
+        raw = db.get_config(key)
+        if raw is None or raw == "":
+            return default if default is not None else None
+        return json.loads(raw)
+    except Exception:
+        return default if default is not None else None
+
+
+def cfg_json_list(key: str) -> list:
+    v = cfg_json(key, [])
+    return v if isinstance(v, list) else []
+
+
+def cfg_json_dict(key: str) -> dict:
+    v = cfg_json(key, {})
+    return v if isinstance(v, dict) else {}
+
+
+async def safe_ephemeral(interaction: discord.Interaction, content: str = None, **kwargs) -> None:
+    """Odpowiedź ephemeral odporna na już użyte interaction.response."""
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content=content, ephemeral=True, **kwargs)
+        else:
+            await interaction.response.send_message(content=content, ephemeral=True, **kwargs)
+    except Exception as e:
+        log("interact", f"safe_ephemeral: {e}")
+
+
+
 def quiet_now() -> bool:
     """True gdy włączone ciche godziny i jesteśmy w oknie 23:00–07:59 Europe/Warsaw."""
     if not feature_on("quiet"):
@@ -642,7 +682,7 @@ class TreningSetupView(discord.ui.View):
         }
         content = None
         try:
-            role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
+            role_ids = [int(x) for x in cfg_json_list("poll_role_ids")]
             if role_ids:
                 content = " ".join(f"<@&{r}>" for r in role_ids)
         except Exception:
@@ -1202,7 +1242,7 @@ class AnkietaRoleView(discord.ui.View):
         super().__init__(timeout=300)
         self.owner_id = owner_id
         try:
-            self.role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
+            self.role_ids = [int(x) for x in cfg_json_list("poll_role_ids")]
         except Exception:
             self.role_ids = []
         self.add_item(AnkietaRoleSelect(self))
@@ -1431,6 +1471,7 @@ class PindolzBot(commands.Bot):
         self.api = StarterLeagueClient()
         self.api.on_division = embeds.set_division
         self._upcoming_cache: tuple[datetime, list] | None = None
+        self._live_lock = asyncio.Lock()
         self.started_at = datetime.now(TZ)
         self._announced = False
         self._live_errors = 0
@@ -1712,6 +1753,15 @@ class PindolzBot(commands.Bot):
         except Exception:
             return None
 
+
+    async def api_call(self, fn, *args, err_tag: str = "api", **kwargs):
+        """asyncio.to_thread + log błędu; zwraca None przy awarii."""
+        try:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        except Exception as e:
+            log(err_tag, f"{getattr(fn, '__name__', fn)}: {type(e).__name__}: {e}")
+            return None
+
     def _main_channel_id(self) -> int | None:
         return db.get_config_int("main_channel_id")
 
@@ -1770,16 +1820,26 @@ class PindolzBot(commands.Bot):
         return t1.get("name") or "???"
 
     async def _edit_or_send(self, channel, embed, msg_id, ch_id, view=None):
+        """Edytuj istniejącą wiadomość albo wyślij nową. Zwraca (msg_id, ch_id) lub (None, None)."""
         if msg_id and ch_id:
             try:
-                ch = await self.get_channel_safe(ch_id) or channel
-                msg = await ch.fetch_message(msg_id)
-                await msg.edit(embed=embed, view=view)
-                return msg.id, ch.id
+                ch = await self.get_channel_safe(int(ch_id)) or channel
+                if ch:
+                    msg = await ch.fetch_message(int(msg_id))
+                    await msg.edit(embed=embed, view=view)
+                    return msg.id, ch.id
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
-        msg = await channel.send(embed=embed, view=view)
-        return msg.id, channel.id
+            except Exception as e:
+                log("edit", f"edit_or_send: {e}")
+        if not channel:
+            return None, None
+        try:
+            msg = await channel.send(embed=embed, view=view)
+            return msg.id, channel.id
+        except Exception as e:
+            log("edit", f"send: {e}")
+            return None, None
 
     @staticmethod
     def _ranks_json(table: list[dict]) -> str:
@@ -2033,7 +2093,10 @@ class PindolzBot(commands.Bot):
     @tasks.loop(seconds=LIVE_INTERVAL_IDLE)
     @guarded
     async def live_check(self):
-        await self._run_live_check()
+        if self._live_lock.locked():
+            return
+        async with self._live_lock:
+            await self._run_live_check()
 
     @live_check.before_loop
     async def before_live(self):
@@ -2299,9 +2362,9 @@ class PindolzBot(commands.Bot):
                 await ch.send(text[:2000])
                 data["sent"] = True
                 _save_sched(sid, data)
-                print(f"[zaplanuj] wysłano #{sid} → {ch_id}")
+                log("zaplanuj", f"wysłano #{sid} → {ch_id}")
             except Exception as e:
-                print(f"[zaplanuj] #{sid}: {e}")
+                log("zaplanuj", f"#{sid}: {e}")
 
 
     async def _trening_advance_to_hours(self, interaction: discord.Interaction, pid: int, data: dict):
@@ -2452,7 +2515,7 @@ class PindolzBot(commands.Bot):
             f"Do zobaczenia na VC."
         )
         try:
-            role_ids = [int(x) for x in json.loads(db.get_config("poll_role_ids") or "[]")]
+            role_ids = [int(x) for x in cfg_json_list("poll_role_ids")]
             if role_ids:
                 announce = " ".join(f"<@&{r}>" for r in role_ids) + "\n" + announce
         except Exception:
@@ -3913,13 +3976,13 @@ async def cmd_coach(interaction: discord.Interaction, osoba: Optional[discord.Me
 
 @bot.event
 async def on_ready():
-    print(f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
-    print(f"Wersja: {BOT_VERSION}")
+    log("ready", f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
+    log("ready", f"Wersja: {BOT_VERSION}")
     try:
         embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
     except Exception:
         pass
-    print("Bot gotowy – komendy za 60 s, taski według soft-startu.")
+    print("Bot gotowy – soft-start ~90 s (komendy + sync w trakcie).")
     if bot._announced:
         return
     bot._announced = True
