@@ -1,4 +1,4 @@
-> **Wersja bota: `1.5.16`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.5.17`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -11,23 +11,25 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 ## Funkcje
 
 - Terminarz i wyniki – **edycja** wiadomości zamiast spamu
-- **LIVE** co **5 s** (mecz) / **10 s** (brak)
-- Soft-start **~90 s** + wiadomość startowa z postępem
+- **LIVE** co **5 s** (mecz) / **10 s** (brak), bez nachodzących przebiegów (lock)
+- Soft-start **~90 s** – błąd jednego kroku nie zatrzymuje reszty
 - **Sync komend na serwer** (`copy_global_to`) – slash-e od razu widoczne
-- **Panele UI**, wiele składów, DM Gram/Nie mogę
-- **Sztab**: kapitan, vicekapitan, **coach**
-- **`/trening`** – ankieta terminu z auto-zamknięciem
-- **`/zaplanuj`** + **`/zaplanuj-lista`**
-- **Ciche godziny** (23–8) – w nocy tylko LIVE
-- **MVP po meczu** – głosowanie 1 z 5
-- **Tygodniówka w DM kapitana**
-- Alert zmiany terminu, linki do meczów na StarterLeague
+- **Sztab**: kapitan, vicekapitan, coach
+- **`/trening`**: dni → godziny → wydarzenie Discord + ogłoszenie
+- Ankiety na kanale **ankiet** (`/setup-ankiety`)
+- Ogłoszenia treningów na kanale **ogłoszeń** (`/setup-ogloszenia`)
+- **`/zaplanuj`**, **`/zaplanuj-lista`**, **`/ogloszenie`**
+- MVP po meczu, ciche godziny, tygodniówka DM kapitana
+- Panele UI, wiele składów, linki do meczów
 
-### 1.5.12
-Natychmiastowy sync slash-komend na guild (naprawia brak `/zaplanuj` na liście).
+### 1.5.17
+Stabilność: odporny soft-start, twardsze `_edit_or_send`, lock LIVE, helpery `log` / `cfg_json` / `safe_ephemeral` / `api_call`.
 
-### 1.5.11
-`/coach`, poprawka `/zaplanuj`, `/zaplanuj-lista`
+### 1.5.16
+Ankiety (w tym trening) tylko na kanale ankiet.
+
+### 1.5.15
+Kanał ogłoszeń tylko pod treningi.
 
 ---
 
@@ -38,6 +40,19 @@ Natychmiastowy sync slash-komend na guild (naprawia brak `/zaplanuj` na liście)
 | 4–16 s | LIVE → prematch → daily → komendy + sync |
 | 20–60 s | Tabela, status, ankiety, API, eventy |
 | 70–90 s | Cleanup, update, zaplanowane, weekly |
+
+---
+
+## Kanały
+
+| Setup | Przeznaczenie |
+|-------|----------------|
+| `/setup` | Główny – wyniki, nadchodzące, prematch |
+| `/setup-live` | LIVE |
+| `/setup-tabela` | Tabela |
+| `/setup-ankiety` | Ankiety (dostępność + trening) |
+| `/setup-ogloszenia` | Tylko ogłoszenia treningów |
+| `/setup-all` | Panel wszystkich kanałów |
 
 ---
 
@@ -52,19 +67,12 @@ Natychmiastowy sync slash-komend na guild (naprawia brak `/zaplanuj` na liście)
 
 ---
 
-## Komendy
+## Komendy (skrót)
 
 **Wszyscy:** `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` `/status` `/wersja` `/pomoc` `/gracze` `/moj-status` `/sztab`  
-**Sztab:** `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj` `/zaplanuj-lista`  
+**Sztab:** `/sklad` `/panel` `/polacz` `/ping-sklad` `/sklad-status` `/ankieta-role` `/trening` `/zaplanuj` `/zaplanuj-lista` `/ogloszenie`  
 **Kapitan+:** `/vicekapitan` `/coach`  
 **Właściciel:** `/setup*` `/ustawienia` `/gif-*` `/pokaz-embedy` `/kapitan`
-
-### `/zaplanuj`
-`data:` YYYY-MM-DD · `godzina:` HH:MM · `tresc:` · opcjonalnie `kanal:` i `ping_roli:`  
-Lista: `/zaplanuj-lista`
-
-Po restarcie w logach powinno być m.in.:
-`[sync] global: N komend` oraz `[sync] …: N komend (guild)`.
 
 ---
 
