@@ -1,4 +1,4 @@
-> **Wersja bota: `1.6.5`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.6`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -10,20 +10,34 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 ## Funkcje
 
-- Terminarz i wyniki – edycja wiadomości
-- **LIVE** 5 s / 10 s
-- Soft-start **~35 s**, sync komend od razu
-- Wiadomość startowa **znika po 2 min** (stopka + auto-delete)
-- Trening, szablony, rola składu, sztab, panele UI
+- Terminarz / wyniki / LIVE
+- Soft-start **~35 s**, wiadomość startu znika po **2 min**
+- **Zbiórka 60 / 30 / 10 min** – DM do składu bez „Gram” + lista do kapitana
+- Prematch z **pingiem roli aktywnego składu** (`/setup-rola-sklad`)
+- **Konflikt terminów** – ostrzeżenie przy treningu blisko meczu ligowego (±2 h)
+- `/trening`, szablony, sztab, panele UI
+
+### 1.6.6
+Zbiórka 60/30/10, ping `@aktywny-skład` na prematch, konflikt trening vs mecz.
 
 ### 1.6.5
-Stopka startu wymuszona w bocie: „zniknie za 2 minuty” (niezależnie od starego embeds).
+Stopka startu 2 min wymuszona w bocie.
 
 ### 1.6.4
 Fix `/setup-all` ChannelSelect.
 
-### 1.6.3
-Soft-start 35 s, usuwanie startu po 2 min.
+---
+
+## Prematch / zbiórka
+
+| Czas | Co |
+|------|-----|
+| 60 min | Kanał + DM zbiórki (feature `prematch1h`) |
+| 30 min | Kanał + DM zbiórki + stare remind DM |
+| 10 min | Kanał + DM zbiórki |
+
+Ping roli z `/setup-rola-sklad`, jeśli ustawiona.  
+Zbiórka: gracze ze składu bez potwierdzenia **Gram**.
 
 ---
 
