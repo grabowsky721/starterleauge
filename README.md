@@ -1,4 +1,4 @@
-> **Wersja bota: `1.6.6`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.7`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -10,45 +10,32 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 ## Funkcje
 
-- Terminarz / wyniki / LIVE
-- Soft-start **~35 s**, wiadomość startu znika po **2 min**
-- **Zbiórka 60 / 30 / 10 min** – DM do składu bez „Gram” + lista do kapitana
-- Prematch z **pingiem roli aktywnego składu** (`/setup-rola-sklad`)
-- **Konflikt terminów** – ostrzeżenie przy treningu blisko meczu ligowego (±2 h)
+- Terminarz / wyniki / LIVE · soft-start ~35 s
+- **Rola aktywnego składu**: przy zapisie składu **oraz na start LIVE**, zdjęcie po wyniku
+- Zbiórka 60/30/10 · ping roli na prematch · konflikt trening vs mecz
 - `/trening`, szablony, sztab, panele UI
 
+### 1.6.7
+Nadawanie roli aktywnego składu także gdy mecz wchodzi w **LIVE**.
+
 ### 1.6.6
-Zbiórka 60/30/10, ping `@aktywny-skład` na prematch, konflikt trening vs mecz.
-
-### 1.6.5
-Stopka startu 2 min wymuszona w bocie.
-
-### 1.6.4
-Fix `/setup-all` ChannelSelect.
+Zbiórka 60/30/10, ping składu, konflikt terminów.
 
 ---
 
-## Prematch / zbiórka
+## Rola aktywnego składu
 
-| Czas | Co |
-|------|-----|
-| 60 min | Kanał + DM zbiórki (feature `prematch1h`) |
-| 30 min | Kanał + DM zbiórki + stare remind DM |
-| 10 min | Kanał + DM zbiórki |
+1. `/setup-rola-sklad @rola`
+2. Nadawana przy **Zapisz na mecz** / **Zapisz + DM**
+3. Ponownie / uzupełniana gdy mecz idzie **LIVE**
+4. Zdejmowana po **wyniku** meczu
 
-Ping roli z `/setup-rola-sklad`, jeśli ustawiona.  
-Zbiórka: gracze ze składu bez potwierdzenia **Gram**.
+Rola bota musi być wyżej na liście ról niż rola składu.
 
 ---
 
 ## GameHost
 
-| Pole | Wartość |
-|------|---------|
-| Git Repo | `https://github.com/grabowsky721/starterleauge` |
-| Bot py file | `src/bot.py` |
-| Auto Update | `1` |
+Git: `https://github.com/grabowsky721/starterleauge` · `src/bot.py` · Auto Update `1`
 
-Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
-
-Team ID: **869**.
+Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN` · Team **869**.
