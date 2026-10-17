@@ -57,23 +57,22 @@ LIVE_INTERVAL_IDLE = 10
 LIVE_INTERVAL_ACTIVE = 5
 # Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
 # Soft-start: mecz → komendy@60s → tło → utrzymanie (~3 min)
-# Soft-start łącznie ~90 s od ready
-START_DELAY_LIVE = 4
-START_DELAY_PREMATCH = 8
-START_DELAY_DAILY = 12
-START_DELAY_COMMANDS = 16
-START_DELAY_TABLE = 20
-START_DELAY_STATUS = 30
-START_DELAY_POLL = 40
-START_DELAY_API = 50
-START_DELAY_EVENT = 60
-START_DELAY_CLEANUP = 70
-START_DELAY_UPDATE = 80
-START_DELAY_WEEKLY = 90
-START_DELAY_COMMANDS_SYNC = 16
-
-# Kolejność startu komend slash (UI; krótka przerwa, by zmieścić się w 90 s)
-COMMAND_START_GAP = 0.35
+# Soft-start łącznie ~35 s od ready
+# Soft-start łącznie ~35 s od ready (bez sekwencyjnego ładowania komend)
+START_DELAY_LIVE = 2
+START_DELAY_PREMATCH = 4
+START_DELAY_DAILY = 6
+START_DELAY_COMMANDS = 8
+START_DELAY_TABLE = 12
+START_DELAY_STATUS = 16
+START_DELAY_POLL = 20
+START_DELAY_API = 24
+START_DELAY_EVENT = 26
+START_DELAY_CLEANUP = 28
+START_DELAY_UPDATE = 30
+START_DELAY_WEEKLY = 35
+START_DELAY_COMMANDS_SYNC = 8
+COMMAND_START_GAP = 0
 COMMAND_START_ORDER = [
     "pomoc",
     "setup",
@@ -1713,9 +1712,9 @@ class PindolzBot(commands.Bot):
 
 
     async def _soft_start_tasks(self):
-        """Mecz → komendy → tło → utrzymanie (łącznie ~90 s)."""
+        """Mecz → sync komend → tło (łącznie ~35 s)."""
         await self.wait_until_ready()
-        print("[start] soft-start (~90 s) · zaplanuj/mvp/quiet…")
+        log("start", "soft-start (~35 s)…")
         done: set[str] = set()
 
         async def run_step(key: str, wait: float, action):
@@ -1740,61 +1739,20 @@ class PindolzBot(commands.Bot):
                 self.daily_check.start()
 
         async def start_commands():
-            # 1 po drugiej: UI co COMMAND_START_GAP s, na końcu pełny sync
-            total = len(COMMAND_START_ORDER)
-            cmd_done: list[str] = []
-            for name in COMMAND_START_ORDER:
-                idx = len(cmd_done) + 1
-                try:
-                    msg = getattr(self, "_boot_msg", None)
-                    if msg:
-                        emb = self._boot_progress_embed(done, current="commands")
-                        emb.title = f"🚀 Start bota · komendy {idx}/{total}"
-                        emb.description = (
-                            f"Wersja **`{BOT_VERSION}`** · ładuję komendy "
-                            f"**{idx}/{total}** · teraz **`/{name}`**"
-                        )
-                        clines = []
-                        for n in COMMAND_START_ORDER:
-                            if n in cmd_done:
-                                clines.append(f"✅ /{n}")
-                            elif n == name:
-                                clines.append(f"🔄 /{n}…")
-                            else:
-                                clines.append(f"⏳ /{n}")
-                        mid = (len(clines) + 1) // 2
-                        emb.add_field(
-                            name=f"Komendy ({idx}/{total})",
-                            value="\n".join(clines[:mid]),
-                            inline=True,
-                        )
-                        emb.add_field(
-                            name="\u200b",
-                            value="\n".join(clines[mid:]),
-                            inline=True,
-                        )
-                        await msg.edit(embed=emb)
-                except Exception as e:
-                    print(f"[boot-cmd] {e}")
-                await asyncio.sleep(COMMAND_START_GAP)
-                cmd_done.append(name)
-                print(f"[start] komenda /{name} ({idx}/{total})")
-
-            # Najpierw global, potem kopia na każdy serwer – komendy widać od razu
+            # Od razu sync global + guild – bez UI „1/39 komend”
             try:
                 synced = await self.tree.sync()
                 names = [c.name for c in synced]
-                print(f"[sync] global: {len(synced)} komend -> {names}")
+                log("sync", f"global: {len(synced)} komend -> {names}")
             except Exception as e:
-                print(f"[sync] global blad: {e}")
-                names = []
+                log("sync", f"global błąd: {e}")
             for guild in self.guilds:
                 try:
                     self.tree.copy_global_to(guild=guild)
                     synced = await self.tree.sync(guild=guild)
-                    print(f"[sync] {guild.name}: {len(synced)} komend (guild)")
+                    log("sync", f"{guild.name}: {len(synced)} komend (guild)")
                 except Exception as e:
-                    print(f"[sync] guild {guild.id}: {e}")
+                    log("sync", f"guild {guild.id}: {e}")
 
         async def start_table():
             if not self.table_update.is_running():
@@ -1852,7 +1810,18 @@ class PindolzBot(commands.Bot):
 
         if not self.loop_watchdog.is_running():
             self.loop_watchdog.start()
-        print("[start] soft-start zakończony")
+        log("start", "soft-start zakończony")
+        # upewnij się, że wiadomość startu zniknie max po 2 min od ready
+        async def _ensure_boot_deleted():
+            await asyncio.sleep(120)
+            msg = getattr(self, "_boot_msg", None)
+            if msg:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                self._boot_msg = None
+        asyncio.create_task(_ensure_boot_deleted())
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         uid = interaction.user.id
@@ -4341,7 +4310,7 @@ async def on_ready():
         embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
     except Exception:
         pass
-    print("Bot gotowy – soft-start ~90 s (komendy + sync w trakcie).")
+    log("ready", "Bot gotowy – soft-start ~35 s (sync komend bez kolejki).")
     if bot._announced:
         return
     bot._announced = True
@@ -4356,7 +4325,7 @@ async def on_ready():
             bot._boot_msg = msg
 
             async def _delete_later():
-                await asyncio.sleep(600)
+                await asyncio.sleep(120)  # usuń wiadomość startu po 2 min
                 try:
                     await msg.delete()
                 except Exception:
