@@ -1,4 +1,4 @@
-> **Wersja bota: `1.6.0`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.1`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -14,14 +14,17 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 - **LIVE** (5 s / 10 s) + lock przebiegów
 - Soft-start **~90 s**, sync slash na guild od razu
 - **Sztab**: kapitan, vice, coach
-- **`/trening`**: dni → godziny → wydarzenie + **ocena 1–5** (wyniki tylko sztab)
+- **`/trening`**: dni → godziny → wydarzenie + ocena 1–5
 - Ankiety → kanał ankiet · ogłoszenia treningów → kanał ogłoszeń
-- **Szablony ogłoszeń**: `/szablon-dodaj` · `/ogloszenie szablon:`
-- Rola **aktywnego składu** przy zapisie składu, zdjęcie po meczu
-- `/zaplanuj`, MVP, ciche godziny, panele UI, wiele składów
+- **Szablony ogłoszeń** · rola **aktywnego składu**
+- `/zaplanuj`, MVP, ciche godziny, panele UI
+
+### 1.6.1
+- Fix `/setup-all` (ChannelSelect + przycisk Zapisz – konflikt wiersza Discord UI)
+- Fix brak `_close_training_poll` po restarcie
 
 ### 1.6.0
-Wersja zbiorcza po cyklu 1.5.x (trening, szablony, rola składu, stabilność, kanały).
+Wersja zbiorcza po cyklu 1.5.x
 
 ---
 
@@ -29,31 +32,13 @@ Wersja zbiorcza po cyklu 1.5.x (trening, szablony, rola składu, stabilność, k
 
 | Komenda | Kanał |
 |---------|--------|
-| `/setup` | Główny (wyniki, nadchodzące, prematch) |
+| `/setup` | Główny |
 | `/setup-live` | LIVE |
 | `/setup-tabela` | Tabela |
 | `/setup-ankiety` | Ankiety + ocena treningu |
 | `/setup-ogloszenia` | Ogłoszenia treningów |
-| `/setup-rola-sklad` | Rola przy składzie na mecz |
-| `/setup-all` | Panel kanałów |
-
----
-
-## Sztab
-
-| Rola | Uprawnienia |
-|------|-------------|
-| Właściciel | wszystko + setup |
-| Kapitan | sztab + vice + coach |
-| Vice / Coach | sztab |
-
----
-
-## Komendy (skrót)
-
-**Wszyscy:** `/pindolz` `/live` `/wyniki` `/nadchodzace` `/tabela` `/status` `/wersja` `/pomoc` `/gracze` `/moj-status` `/sztab` `/szablon-lista`  
-**Sztab:** `/sklad` `/panel` `/trening` `/ogloszenie` `/szablon-*` `/zaplanuj` …  
-**Właściciel:** `/setup*` `/ustawienia` `/kapitan` `/setup-rola-sklad`
+| `/setup-rola-sklad` | Rola składu na mecz |
+| `/setup-all` | Panel wszystkich kanałów |
 
 ---
 
