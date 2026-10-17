@@ -516,6 +516,43 @@ def _next_training_id() -> int:
     return n
 
 
+async def _close_training_poll(pid: int) -> None:
+    """Domknięcie ankiety treningu z timerem closes_at."""
+    data = _load_training(pid)
+    if not data or data.get("closed"):
+        return
+    if not data.get("closes_at") and data.get("phase") in ("days", "hours"):
+        return
+    data["closed"] = True
+    _save_training(pid, data)
+    ch_id = data.get("channel_id")
+    msg_id = data.get("message_id")
+    if not ch_id or not msg_id:
+        return
+    try:
+        ch = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+        msg = await ch.fetch_message(int(msg_id))
+        emb = training_embed(data, closed=True)
+        await msg.edit(embed=emb, view=None)
+    except Exception as e:
+        log("trening", f"close #{pid}: {e}")
+
+
+async def _schedule_training_close(pid: int, closes_at: int) -> None:
+    """Czeka do closes_at i zamyka ankietę."""
+    try:
+        delay = max(0, int(closes_at) - int(datetime.now(TZ).timestamp()))
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await _close_training_poll(pid)
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        log("trening", f"schedule close #{pid}: {e}")
+
+
+
+
 def _next_weekday_dt(weekday: int, hour: int, minute: int) -> datetime:
     """Najbliższy wybrany dzień tygodnia (0=pn) o danej godzinie Europe/Warsaw."""
     now = datetime.now(TZ)
@@ -1224,7 +1261,7 @@ class SetupPanelView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Zapisz", style=discord.ButtonStyle.success, emoji="💾", row=3)
+    @discord.ui.button(label="Zapisz", style=discord.ButtonStyle.success, emoji="💾", row=4)
     async def btn_save(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not (self.main_id and self.live_id and self.table_id):
             await interaction.response.send_message("Ustaw wszystkie trzy kanały.", ephemeral=True)
@@ -1603,24 +1640,26 @@ class PindolzBot(commands.Bot):
 
 
     async def _reschedule_training_polls(self):
-        """Po restarcie domknij lub wznow odliczanie ankiet treningu."""
+        """Po restarcie: domknij tylko ankiety z closes_at (stary tryb)."""
         await asyncio.sleep(20)
         try:
-            # skan sekwencji wstecz – max 50 ostatnich
             seq = int(db.get_config("training_poll_seq") or "1")
             now = int(datetime.now(TZ).timestamp())
             for pid in range(max(1, seq - 50), seq):
                 data = _load_training(pid)
-                if not data or data.get("closed"):
+                if not data or data.get("closed") or data.get("phase") == "done":
                     continue
                 closes = int(data.get("closes_at") or 0)
-                if closes and closes <= now:
+                if not closes:
+                    continue
+                if closes <= now:
                     await _close_training_poll(pid)
-                elif closes:
+                else:
                     asyncio.create_task(_schedule_training_close(pid, closes))
-                    print(f"[trening] wznowiono timer #{pid}")
+                    log("trening", f"wznowiono timer #{pid}")
         except Exception as e:
-            print(f"[trening] reschedule: {e}")
+            log("trening", f"reschedule: {e}")
+
 
     BOOT_LABELS = (
         ("live", "LIVE"),
