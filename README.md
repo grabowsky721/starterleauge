@@ -8,31 +8,23 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 ---
 
-## Funkcje
-
-- Terminarz / wyniki / LIVE · soft-start ~35 s
-- **Rola aktywnego składu** – tylko po **ustaleniu składu** (Zapisz na mecz / Zapisz + DM), zdjęcie po wyniku
-- Zbiórka 60/30/10 · ping roli na prematch · konflikt trening vs mecz
-- `/trening`, szablony, sztab, panele UI
-
-### 1.6.8
-Rola składu **nie** jest nadawana przy LIVE – tylko po zapisie składu.
-
-### 1.6.6
-Zbiórka 60/30/10, ping składu, konflikt terminów.
-
----
-
 ## Rola aktywnego składu
 
 1. `/setup-rola-sklad @rola`
-2. **Zapisz na mecz** lub **Zapisz + DM** → nadanie roli
+2. Po **Zapisz na mecz** lub **Zapisz + DM** → nadanie roli składowi
 3. Po **wyniku** meczu → zdjęcie roli
+
+*(Bez nadawania przy LIVE.)*
 
 ---
 
-## GameHost
+## Inne
 
-`src/bot.py` · Auto Update `1` · sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
+- Soft-start ~35 s · start znika po 2 min
+- Zbiórka 60/30/10 · ping roli na prematch
+- Konflikt trening vs mecz · `/trening` · szablony
 
-Team ID: **869**.
+### 1.6.8
+Rola tylko po ustaleniu składu (nie przy LIVE).
+
+Team **869** · `src/bot.py` · sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
