@@ -177,8 +177,8 @@ class LiveChannelView(discord.ui.View):
 
 # ---------- Włączanie / wyłączanie funkcji (/ustawienia) ----------
 FEATURES = {
-    "prematch": ("Przypomnienia", "⏰ Przypomnienie 30 min przed meczem na kanale głównym"),
-    "prematch1h": ("Przypomnienie 1 h", "⏰ Przypomnienie 1 godzinę przed meczem na kanale głównym"),
+    "prematch": ("Przypomnienia", "⏰ Zbiórka 30/10 min + ping aktywnego składu"),
+    "prematch1h": ("Przypomnienie 1 h", "⏰ Zbiórka 60 min przed meczem"),
     "events": ("Wydarzenia", "📆 Wydarzenie serwera Discord dla najbliższego meczu"),
     "gg": ("GG", "👏 Przycisk „GG” pod wynikiem"),
     "updates": ("Aktualizacje", "🆕 Powiadomienie o nowej wersji bota na GitHubie"),
@@ -2167,7 +2167,7 @@ class PindolzBot(commands.Bot):
         try:
             upcoming = self._upcoming_cached()
         except Exception as e:
-            print(f"[prematch] API error: {e}")
+            log("prematch", f"API error: {e}")
             return
         now = datetime.now(TZ)
         for m in upcoming:
@@ -2176,14 +2176,23 @@ class PindolzBot(commands.Bot):
             if mid is None or dt is None:
                 continue
             delta = dt - now
-            if timedelta(0) < delta <= timedelta(minutes=self.PREMATCH_MINUTES):
-                stage = self.PREMATCH_MINUTES
-            elif timedelta(minutes=self.PREMATCH_MINUTES) < delta <= timedelta(minutes=60):
+            if timedelta(0) < delta <= timedelta(minutes=10):
+                stage = 10
+            elif timedelta(minutes=10) < delta <= timedelta(minutes=30):
+                stage = 30
+            elif timedelta(minutes=30) < delta <= timedelta(minutes=60):
                 stage = 60
             else:
                 continue
-            key = f"prematch_{mid}" if stage == self.PREMATCH_MINUTES else f"prematch60_{mid}"
+            key = f"prematch{stage}_{mid}"
             if db.get_config(key):
+                continue
+            # feature flags: 60→prematch1h, 30/10→prematch
+            feat = "prematch1h" if stage == 60 else "prematch"
+            if not feature_on(feat) and stage != 10:
+                # 10 min zawsze przy włączonym prematch
+                continue
+            if stage == 10 and not feature_on("prematch"):
                 continue
             db.set_config(key, "1")
             form = standing = opp_standing = None
@@ -2192,7 +2201,7 @@ class PindolzBot(commands.Bot):
             except Exception:
                 pass
             try:
-                table = (await asyncio.to_thread(self.api.get_division6_table))
+                table = await asyncio.to_thread(self.api.get_division6_table)
                 opp_name = self._opponent(m).upper()
                 for row in table:
                     name = ((row.get("team") or {}).get("name") or "").upper()
@@ -2202,15 +2211,35 @@ class PindolzBot(commands.Bot):
                         opp_standing = row
             except Exception:
                 pass
-            if stage == self.PREMATCH_MINUTES:
-                await self._send_reminder_dms(m)
-            if channel and feature_on("prematch" if stage == self.PREMATCH_MINUTES else "prematch1h"):
+            # zbiórka DM do składu bez „Gram”
+            try:
+                await self._zbiorka_dms(m, stage)
+            except Exception as e:
+                log("zbiorka", str(e))
+            if stage == 30:
                 try:
-                    await channel.send(embed=embeds.prematch_embed(m, form=form, standing=standing, opp_standing=opp_standing, minutes=stage, lineup=self._lineup_ids(mid), nicks=_player_nicks()))
-                    print(f"[prematch] wysłano przypomnienie ({stage} min) o meczu {mid}")
+                    await self._send_reminder_dms(m)
+                except Exception:
+                    pass
+            if channel:
+                try:
+                    content = self._active_lineup_ping()
+                    await channel.send(
+                        content=content or None,
+                        embed=embeds.prematch_embed(
+                            m,
+                            form=form,
+                            standing=standing,
+                            opp_standing=opp_standing,
+                            minutes=stage,
+                            lineup=self._lineup_ids(mid),
+                            nicks=_player_nicks(),
+                        ),
+                    )
+                    log("prematch", f"wysłano ({stage} min) mecz {mid}")
                 except Exception as e:
                     db.set_config(key, None)
-                    print(f"[prematch] send error: {e}")
+                    log("prematch", f"send error: {e}")
 
     @prematch_check.before_loop
     async def before_prematch(self):
@@ -2581,6 +2610,23 @@ class PindolzBot(commands.Bot):
             return
         start_dt = _next_weekday_dt(WEEKDAY_INDEX[day_key], hour_i, min_i)
         end_dt = start_dt + timedelta(hours=2)
+        # konflikt z meczem ligowym?
+        conflict_note = ""
+        try:
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+            for mm in upcoming or []:
+                mdt = embeds._match_dt(mm)
+                if not mdt:
+                    continue
+                # nakładanie ±2h
+                if abs((mdt - start_dt).total_seconds()) < 2 * 3600:
+                    conflict_note = (
+                        f"\n⚠️ **Konflikt terminów:** mecz ligowy vs **{self._opponent(mm)}** "
+                        f"<t:{int(mdt.timestamp())}:f> (w oknie ±2 h od treningu)."
+                    )
+                    break
+        except Exception as e:
+            log("trening", f"konflikt: {e}")
         guild = interaction.guild
         if not guild and data.get("guild_id"):
             guild = self.get_guild(int(data["guild_id"]))
@@ -2618,6 +2664,8 @@ class PindolzBot(commands.Bot):
             f"**{day_label}** o **{hour_s}**\n"
             f"🗓 <t:{int(start_dt.timestamp())}:F> · <t:{int(start_dt.timestamp())}:R>"
         )
+        if conflict_note:
+            result += conflict_note
         if ev:
             result += f"\n📎 Wydarzenie: {ev.url}" if getattr(ev, "url", None) else f"\n📎 Wydarzenie ID: {ev.id}"
         data["phase"] = "done"
@@ -3266,6 +3314,62 @@ class PindolzBot(commands.Bot):
             return [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
         except Exception:
             return []
+
+    def _active_lineup_ping(self) -> str | None:
+        """Ping roli aktywnego składu (setup-rola-sklad), inaczej None."""
+        rid = active_lineup_role_id()
+        if not rid:
+            return None
+        return f"<@&{int(rid)}>"
+
+    async def _zbiorka_dms(self, match: dict, stage: int) -> None:
+        """DM do graczy ze składu, którzy nie potwierdzili „Gram” (60/30/10 min)."""
+        mid = match.get("id")
+        if mid is None:
+            return
+        # nie spamuj: jeden DM na etap
+        flag = f"zbiorka_{stage}_{mid}"
+        if db.get_config(flag):
+            return
+        ids = self._lineup_ids(mid)
+        if not ids:
+            return
+        confirms = _lineup_confirms(int(mid))
+        missing = [uid for uid in ids if confirms.get(str(uid)) != "yes"]
+        if not missing:
+            db.set_config(flag, "1")
+            return
+        opp = self._opponent(match)
+        when = embeds._match_dt(match)
+        when_s = when.strftime("%d.%m %H:%M") if when else "?"
+        text = (
+            f"⏰ **Zbiórka – za ~{stage} min**\n"
+            f"Mecz vs **{opp}** · {when_s}\n"
+            f"Nie potwierdziłeś jeszcze **Gram**. Odpowiedz na DM ze składem albo daj znać kapitanowi."
+        )
+        sent = 0
+        for uid in missing:
+            try:
+                user = self.get_user(uid) or await self.fetch_user(uid)
+                await user.send(text)
+                sent += 1
+            except Exception:
+                pass
+        db.set_config(flag, "1")
+        log("zbiorka", f"mid={mid} stage={stage} dm={sent}/{len(missing)}")
+        # lista braków dla kapitana
+        try:
+            cap = db.get_config_int("captain_id")
+            if cap and missing:
+                u = self.get_user(cap) or await self.fetch_user(cap)
+                lista = ", ".join(f"<@{i}>" for i in missing)
+                await u.send(
+                    f"📋 **Zbiórka {stage} min** – brak potwierdzenia ({len(missing)}): {lista}\n"
+                    f"vs **{opp}** · mecz `#{mid}`"
+                )
+        except Exception as e:
+            log("zbiorka", f"kapitan: {e}")
+
 
     @staticmethod
     def _lineup_names(guild, ids: list[int]) -> list[str]:
