@@ -1298,7 +1298,12 @@ class SetupChannelSelect(discord.ui.ChannelSelect):
 
     async def callback(self, interaction: discord.Interaction):
         ch = self.values[0]
-        cid = getattr(ch, "id", int(ch))
+        # AppCommandChannel / TextChannel – zawsze .id (nie używać getattr(..., int(ch)):
+        # domyślny argument getattr liczy się od razu i wywala TypeError)
+        cid = int(getattr(ch, "id", None) or getattr(ch, "value", 0))
+        if not cid:
+            await interaction.response.send_message("Nie udało się odczytać kanału.", ephemeral=True)
+            return
         if self.kind == "main":
             self.panel.main_id = cid
         elif self.kind == "live":
