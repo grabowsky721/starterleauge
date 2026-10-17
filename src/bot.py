@@ -1697,6 +1697,7 @@ class PindolzBot(commands.Bot):
             self._live_channel_id(),
             self._table_channel_id(),
         )
+        emb.set_footer(text="Ta wiadomość zniknie za 2 minuty")
         emb.title = f"🚀 Start bota ({done_n}/{total})"
         emb.description = f"Wersja **`{BOT_VERSION}`** · soft-start w toku"
         if done_n >= total:
