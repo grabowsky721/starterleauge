@@ -1,4 +1,4 @@
-> **Wersja bota: `1.6.11`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.12`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -14,14 +14,12 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 - Brak daty → **nie ustalono terminu**
 - Rola aktywnego składu po zapisie składu
 - Zbiórka 60/30/10 · ping roli · konflikt trening vs mecz
-- `/trening`, szablony, sztab, panele UI
+- Cache API (upcoming 10 min, tabela 5 min) – mniej blokowania event loop
+
+### 1.6.12
+Async cache terminarza i tabeli, `load_lineup_ids`, prematch bez sync API w pętli.
 
 ### 1.6.11
-Ulepszenia kodu: odporny soft-start (błąd kroku nie wywala reszty), jednolite logi, `safe_int`, drobne poprawki embeds.
-
-### 1.6.10
-Brak daty = nie ustalono terminu.
-
----
+Odporny soft-start, logi, `safe_int`.
 
 Team **869** · `src/bot.py` + `src/embeds.py`
