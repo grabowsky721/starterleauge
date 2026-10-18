@@ -4,21 +4,31 @@
 
 Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [StarterLeague](https://starterleague.pl).
 
-> Przy każdej zmianie kodu aktualizuj **`VERSION`** i tę linię na górze README.
-
 ---
 
-## Funkcje
+## Struktura repo
 
-- Terminarz / wyniki / LIVE · soft-start ~35 s
-- Brak daty → **nie ustalono terminu**
-- Rola składu, zbiórka 60/30/10, ping roli, konflikt treningów
-- Cache API · mniej blokowania event loop
+```
+.env.example
+README.md
+VERSION
+requirements.txt
+src/
+  __init__.py
+  bot.py          # start GameHost: src/bot.py
+  client.py       # StarterLeague API
+  db.py           # SQLite
+  embeds.py       # karty Discord
+```
 
-### 1.6.13
-`fetch_user_safe`, async `get_form`, logi w `guarded` zamiast surowego print.
+## GameHost
 
-### 1.6.12
-Async cache terminarza i tabeli.
+| Pole | Wartość |
+|------|---------|
+| Bot py file | `src/bot.py` |
+| Requirements | `requirements.txt` |
+| Auto Update | `1` |
 
-Team **869** · `src/bot.py`
+Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
+
+Team ID: **869**.
