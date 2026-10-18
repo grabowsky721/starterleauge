@@ -82,7 +82,7 @@ def _add_links(embed: discord.Embed, match: dict | int | None = None) -> discord
 
 def _team_name(match: dict, side: str) -> str:
     team = match.get(side) or {}
-    return team.get("name") or "???"
+    return (team.get("name") or "").strip() or "—"
 
 
 def _score_str(match: dict) -> str:
@@ -149,12 +149,15 @@ def _match_dt(match: dict) -> datetime | None:
 def _ts(match: dict, style: str = "F") -> str:
     dt = _match_dt(match)
     if not dt:
-        return match.get("matchDate") or "?"
+        # API: jak jest data, jest też godzina – brak daty = brak terminu
+        return "nie ustalono terminu"
     return f"<t:{int(dt.timestamp())}:{style}>"
 
 
 def _fmt_datetime(match: dict) -> str:
-    date = match.get("matchDate") or "?"
+    date = match.get("matchDate")
+    if not date:
+        return "nie ustalono terminu"
     time = (match.get("matchTime") or "")[:5]
     return f"{date} {time}" if time else date
 
@@ -291,7 +294,7 @@ def result_embed(
             seed = str(match.get("id") or match.get("matchDate") or "")
             desc += f"\n*{random.Random(seed).choice(pool)}*"
     embed = _base(title, color, desc)
-    embed.add_field(name="📅 Data", value=match.get("matchDate") or "-", inline=True)
+    embed.add_field(name="📅 Data", value=match.get("matchDate") or "nie ustalono terminu", inline=True)
     embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
     if form:
         embed.add_field(name="🔥 Forma (ost. 5)", value=_form_icons(form), inline=False)
@@ -352,7 +355,7 @@ def match_ended_embed(
 def schedule_changed_embed(match: dict, old_date: str | None, old_time: str | None) -> discord.Embed:
     opponent = _opponent(match)
     old_t = (old_time or "")[:5] if old_time else "?"
-    old_d = old_date or "?"
+    old_d = old_date or "nie ustalono terminu"
     embed = _base(
         "📅 Zmiana terminu meczu",
         C_UPCOMING,
@@ -416,7 +419,7 @@ def weekly_summary_embed(
         )
     if matches:
         lines = [
-            f"`{m.get('matchDate') or '?'}` {_team_name(m, 'team1')} {_score_str(m)} {_team_name(m, 'team2')}"
+            f"`{m.get('matchDate') or 'nie ustalono terminu'}` {_team_name(m, 'team1')} {_score_str(m)} {_team_name(m, 'team2')}"
             for m in matches[:10]
         ]
         embed.add_field(name="Wyniki", value="\n".join(lines), inline=False)
@@ -435,7 +438,7 @@ def restart_embed(version: str, main_id: int | None, live_id: int | None, table_
         value=f"Główny: {ch(main_id)}\nLIVE: {ch(live_id)}\nTabela: {ch(table_id)}",
         inline=False,
     )
-    embed.set_footer(text="Ta wiadomość zniknie za 10 minut")
+    embed.set_footer(text="Ta wiadomość zniknie za 2 minuty")
     return embed
 
 
