@@ -103,6 +103,8 @@ COMMAND_START_ORDER = [
     "ping-sklad",
     "moj-status",
     "kapitan",
+    "zastepstwo",
+    "zastepstwo-koniec",
     "vicekapitan",
     "sztab",
     "trening",
@@ -1873,6 +1875,27 @@ class PindolzBot(commands.Bot):
     def vice_captain_id(self) -> int | None:
         return db.get_config_int("vice_captain_id")
 
+    def deputy_id(self) -> int | None:
+        """Zastępca tylko pod DM zbiórki; wygasa po deputy_until."""
+        until = db.get_config("deputy_until")
+        if not until:
+            db.set_config("deputy_id", None)
+            return None
+        try:
+            exp = datetime.fromisoformat(until)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=TZ)
+            if datetime.now(TZ) >= exp:
+                db.set_config("deputy_id", None)
+                db.set_config("deputy_until", None)
+                return None
+        except Exception:
+            db.set_config("deputy_id", None)
+            db.set_config("deputy_until", None)
+            return None
+        return db.get_config_int("deputy_id")
+
+
     def coach_id(self) -> int | None:
         return db.get_config_int("coach_id")
 
@@ -3413,18 +3436,30 @@ class PindolzBot(commands.Bot):
                 pass
         db.set_config(flag, "1")
         log("zbiorka", f"mid={mid} stage={stage} dm={sent}/{len(missing)}")
-        # lista braków dla kapitana
+        # lista braków dla kapitana + zastępcy (tylko DM, bez uprawnień komend)
         try:
-            cap = db.get_config_int("captain_id")
-            if cap and missing:
-                u = await self.fetch_user_safe(cap)
+            if missing:
                 lista = ", ".join(f"<@{i}>" for i in missing)
-                await u.send(
+                body = (
                     f"📋 **Zbiórka {stage} min** – brak potwierdzenia ({len(missing)}): {lista}\n"
                     f"vs **{opp}** · mecz `#{mid}`"
                 )
+                recipients: list[int] = []
+                cap = db.get_config_int("captain_id")
+                if cap:
+                    recipients.append(int(cap))
+                dep = self.deputy_id()
+                if dep and int(dep) not in recipients:
+                    recipients.append(int(dep))
+                for rid in recipients:
+                    try:
+                        u = await self.fetch_user_safe(rid)
+                        if u:
+                            await u.send(body)
+                    except Exception as e:
+                        log("zbiorka", f"DM {rid}: {e}")
         except Exception as e:
-            log("zbiorka", f"kapitan: {e}")
+            log("zbiorka", f"kapitan/zastępca: {e}")
 
 
     @staticmethod
@@ -4161,6 +4196,44 @@ async def cmd_kapitan(interaction: discord.Interaction, osoba: Optional[discord.
     if bot.vice_captain_id() == osoba.id:
         db.set_config("vice_captain_id", None)
     await interaction.response.send_message(f"Kapitan: **{osoba.mention}**", ephemeral=True)
+
+
+@bot.tree.command(name="zastepstwo", description="Ustaw zastępcę pod DM zbiórki (kapitan/właściciel)")
+@app_commands.describe(osoba="Kto dostaje DM o brakach", dni="Na ile dni (1–14)")
+async def cmd_zastepstwo(
+    interaction: discord.Interaction,
+    osoba: discord.Member,
+    dni: app_commands.Range[int, 1, 14] = 3,
+):
+    if not (bot.is_owner(interaction) or bot.is_captain(interaction)):
+        await interaction.response.send_message("Tylko kapitan lub właściciel.", ephemeral=True)
+        return
+    # NIE zmienia is_captain – /vicekapitan, /coach bez zmian
+    until = datetime.now(TZ) + timedelta(days=int(dni))
+    db.set_config("deputy_id", str(osoba.id))
+    db.set_config("deputy_until", until.isoformat())
+    await interaction.response.send_message(
+        f"✅ Zastępstwo: **{osoba.mention}** do **{until.strftime('%d.%m.%Y %H:%M')}**.\n"
+        f"Dostaje DM o zbiórce (braki Gram). Bez komend kapitana.",
+        ephemeral=True,
+    )
+    try:
+        await osoba.send(
+            f"Zastępstwo kapitana do {until.strftime('%d.%m.%Y %H:%M')} – "
+            f"będziesz dostawać DM o brakach potwierdzeń przy zbiórce (PINDOLZ)."
+        )
+    except Exception:
+        pass
+
+
+@bot.tree.command(name="zastepstwo-koniec", description="Zakończ zastępstwo (kapitan/właściciel)")
+async def cmd_zastepstwo_koniec(interaction: discord.Interaction):
+    if not (bot.is_owner(interaction) or bot.is_captain(interaction)):
+        await interaction.response.send_message("Tylko kapitan lub właściciel.", ephemeral=True)
+        return
+    db.set_config("deputy_id", None)
+    db.set_config("deputy_until", None)
+    await interaction.response.send_message("Zastępstwo zakończone.", ephemeral=True)
 
 
 @bot.tree.command(name="vicekapitan", description="Ustaw lub usuń vicekapitana (właściciel lub kapitan)")
