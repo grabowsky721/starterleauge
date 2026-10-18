@@ -1,34 +1,25 @@
-> **Wersja bota: `1.6.13`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.14`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
-Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [StarterLeague](https://starterleague.pl).
+Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869).
 
----
-
-## Struktura repo
+## Struktura
 
 ```
-.env.example
-README.md
-VERSION
-requirements.txt
-src/
-  __init__.py
-  bot.py          # start GameHost: src/bot.py
-  client.py       # StarterLeague API
-  db.py           # SQLite
-  embeds.py       # karty Discord
+.env.example · README.md · VERSION · requirements.txt
+src/bot.py · client.py · db.py · embeds.py
 ```
+
+## Zastępstwo (1.6.14)
+
+- `/zastepstwo @osoba dni:3` – kapitan/właściciel
+- `/zastepstwo-koniec`
+- Zastępca dostaje **tylko DM o zbiórce** (lista kto nie potwierdził Gram)
+- **Bez** komend kapitana (`/vicekapitan`, `/coach` bez zmian)
 
 ## GameHost
 
-| Pole | Wartość |
-|------|---------|
-| Bot py file | `src/bot.py` |
-| Requirements | `requirements.txt` |
-| Auto Update | `1` |
+`src/bot.py` · Auto Update `1` · sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
 
-Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
-
-Team ID: **869**.
+Team **869**.
