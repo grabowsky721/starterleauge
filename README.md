@@ -1,4 +1,4 @@
-> **Wersja bota: `1.6.8`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.9`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
@@ -8,23 +8,20 @@ Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID 869) w lidze [Starte
 
 ---
 
-## Rola aktywnego składu
+## Funkcje
 
-1. `/setup-rola-sklad @rola`
-2. Po **Zapisz na mecz** lub **Zapisz + DM** → nadanie roli składowi
-3. Po **wyniku** meczu → zdjęcie roli
+- Terminarz / wyniki / LIVE · soft-start ~35 s
+- Brak daty meczu → **„nie ustalono terminu”** (nie `?`)
+- Rola aktywnego składu po zapisie składu, zdjęcie po wyniku
+- Zbiórka 60/30/10 · ping roli · konflikt trening vs mecz
+- `/trening`, szablony, sztab, panele UI
 
-*(Bez nadawania przy LIVE.)*
+### 1.6.9
+Zamiast `?` przy braku daty: **nie ustalono terminu** (brak godziny: „nie ustalono godziny”).
+
+### 1.6.8
+Rola składu tylko po ustaleniu składu.
 
 ---
 
-## Inne
-
-- Soft-start ~35 s · start znika po 2 min
-- Zbiórka 60/30/10 · ping roli na prematch
-- Konflikt trening vs mecz · `/trening` · szablony
-
-### 1.6.8
-Rola tylko po ustaleniu składu (nie przy LIVE).
-
-Team **869** · `src/bot.py` · sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
+Team **869** · `src/bot.py` + `src/embeds.py` · sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
