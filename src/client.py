@@ -10,46 +10,62 @@ load_dotenv()
 API_BASE = "https://starterleague.pl/api/partners"
 PINDOLZ_TEAM_ID = 869
 DIVISION_6 = "Starter Division 6"
-MASTERS = "Starter Masters"
+MAX_PAGES = 30
 
 
 class StarterLeagueClient:
     def __init__(self, token: str | None = None):
-        self.on_division = None  # opcjonalny callback nazwy dywizji
-        self.token = token or os.getenv("STARTERLEAGUE_API_TOKEN") or ""
+        self.token = token or os.getenv("STARTERLEAGUE_API_TOKEN")
+        if not self.token:
+            raise ValueError("Brak STARTERLEAGUE_API_TOKEN")
+
         self.session = requests.Session()
-        self.session.headers.update({
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.token}",
-        })
+        self.session.headers.update(
+            {
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/json",
+            }
+        )
+        self.current_division: str = DIVISION_6
+        self.on_division = None  # callback(nazwa_dywizji), ustawiany przez bota
         self._cache: dict[str, tuple[float, Any]] = {}
-        self._default_ttl = 30.0
+        self._cache_ttl = {
+            "live": 4,
+            "standings": 45,
+            "upcoming": 60,
+            "history": 90,
+        }
 
     def _cache_get(self, key: str):
         item = self._cache.get(key)
         if not item:
             return None
-        exp, val = item
-        if time.time() > exp:
+        expires, value = item
+        if time.monotonic() > expires:
             self._cache.pop(key, None)
             return None
-        return val
+        return value
 
     def _cache_set(self, key: str, value: Any, ttl: float | None = None) -> Any:
-        self._cache[key] = (time.time() + (ttl if ttl is not None else self._default_ttl), value)
+        if ttl is None:
+            ttl = self._cache_ttl.get(key, 30)
+        self._cache[key] = (time.monotonic() + ttl, value)
         return value
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         url = f"{API_BASE}{path}"
-        last_err = None
+        last_err: Exception | None = None
         for attempt in range(2):
             try:
-                r = self.session.get(url, params=params, timeout=12)
-                r.raise_for_status()
-                return r.json()
-            except Exception as e:
+                resp = self.session.get(url, params=params, timeout=12)
+                resp.raise_for_status()
+                return resp.json()
+            except (requests.Timeout, requests.ConnectionError) as e:
                 last_err = e
-                time.sleep(0.4 * (attempt + 1))
+                if attempt == 0:
+                    time.sleep(0.8)
+                    continue
+                raise
         raise last_err  # type: ignore
 
     def _is_pindolz(self, match: dict) -> bool:
@@ -58,97 +74,80 @@ class StarterLeagueClient:
         return t1.get("id") == PINDOLZ_TEAM_ID or t2.get("id") == PINDOLZ_TEAM_ID
 
     def _fetch_all_pages(self, path: str) -> list[dict]:
-        out: list[dict] = []
+        items: list[dict] = []
         page = 1
-        max_pages = 30
-        while page <= max_pages:
-            data = self._get(path, {"page": page})
-            items = data.get("data") or data.get("matches") or []
-            if isinstance(data, list):
-                items = data
-            if not items:
-                break
-            out.extend(items)
-            meta = data.get("meta") or data.get("pagination") or {}
-            if isinstance(meta, dict):
-                last = meta.get("last_page") or meta.get("total_pages")
-                if last and page >= int(last):
-                    break
-            if len(items) < 10:
+        while page <= MAX_PAGES:
+            data = self._get(path, params={"page": page})
+            page_items = data.get("items") or []
+            items.extend(page_items)
+            pagination = data.get("pagination") or {}
+            if not pagination.get("hasNextPage"):
                 break
             page += 1
-        return out
+        return items
 
     def get_live_raw(self) -> dict:
         return self._get("/matches/live")
 
     def get_pindolz_upcoming(self) -> list[dict]:
-        key = "upcoming"
-        hit = self._cache_get(key)
-        if hit is not None:
-            return hit
-        items = [m for m in self._fetch_all_pages("/matches/upcoming") if self._is_pindolz(m)]
-        return self._cache_set(key, items, 45)
+        cached = self._cache_get("upcoming")
+        if cached is not None:
+            return cached
+        data = [m for m in self._fetch_all_pages("/matches/upcoming") if self._is_pindolz(m)]
+        return self._cache_set("upcoming", data)
 
     def get_pindolz_history(self) -> list[dict]:
-        key = "history"
-        hit = self._cache_get(key)
-        if hit is not None:
-            return hit
-        items = [m for m in self._fetch_all_pages("/matches/history") if self._is_pindolz(m)]
-        return self._cache_set(key, items, 60)
+        cached = self._cache_get("history")
+        if cached is not None:
+            return cached
+        data = [m for m in self._fetch_all_pages("/matches/history") if self._is_pindolz(m)]
+        return self._cache_set("history", data)
 
     def get_pindolz_live(self) -> list[dict]:
-        key = "live"
-        hit = self._cache_get(key)
-        if hit is not None:
-            return hit
+        cached = self._cache_get("live")
+        if cached is not None:
+            return cached
         data = self.get_live_raw()
-        items = data.get("data") or data.get("matches") or []
-        if isinstance(data, list):
-            items = data
-        items = [m for m in items if self._is_pindolz(m)]
-        return self._cache_set(key, items, 5)
+        items = data.get("items") or []
+        result = [m for m in items if self._is_pindolz(m)]
+        return self._cache_set("live", result)
 
     def get_standings(self, division: str | None = None) -> dict:
-        params = {}
-        if division:
-            params["division"] = division
-        return self._get("/standings", params)
+        params = {"division": division} if division else None
+        return self._get("/standings", params=params)
 
     def get_pindolz_division(self) -> str:
-        # try detect from standings
-        for div in (DIVISION_6, MASTERS):
+        """Dywizja PINDOLZ wykrywana z meczów (live → nadchodzące → historia)."""
+        cached = self._cache_get("division")
+        if cached:
+            return cached
+        name = None
+        for fetch in (self.get_pindolz_live, self.get_pindolz_upcoming, self.get_pindolz_history):
             try:
-                data = self.get_standings(div)
-                table = self._extract_table(data, div)
-                if self._has_pindolz(table):
-                    if callable(self.on_division):
-                        try:
-                            self.on_division(div)
-                        except Exception:
-                            pass
-                    return div
+                for m in fetch():
+                    if m.get("division"):
+                        name = m["division"]
+                        break
             except Exception:
                 continue
-        return DIVISION_6
+            if name:
+                break
+        return self._cache_set("division", name or DIVISION_6, ttl=600)
 
-    def _extract_table(self, data: dict, division: str) -> list[dict]:
-        if isinstance(data, list):
-            return data
-        for key in ("data", "standings", "table", "rows"):
-            if isinstance(data.get(key), list):
-                return data[key]
-        divisions = data.get("divisions") or {}
-        if isinstance(divisions, dict) and division in divisions:
-            block = divisions[division]
-            if isinstance(block, list):
-                return block
-            if isinstance(block, dict):
-                return block.get("standings") or block.get("table") or []
+    @staticmethod
+    def _extract_table(data: dict, division: str) -> list[dict]:
+        divisions = data.get("divisions") or []
+        for d in divisions:
+            if d.get("division") == division:
+                return d.get("table") or []
+        key = division.lower().replace(" ", "")
+        for d in divisions:
+            if (d.get("division") or "").lower().replace(" ", "") == key:
+                return d.get("table") or []
         return []
 
-    def _has_pindolz(self, table: list[dict]) -> bool:
+    @staticmethod
+    def _has_pindolz(table: list[dict]) -> bool:
         for row in table:
             team = row.get("team") or {}
             if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
@@ -156,18 +155,35 @@ class StarterLeagueClient:
         return False
 
     def get_division_table(self) -> list[dict]:
-        key = "table"
-        hit = self._cache_get(key)
-        if hit is not None:
-            return hit
-        div = self.get_pindolz_division()
-        data = self.get_standings(div)
-        table = self._extract_table(data, div)
-        return self._cache_set(key, table, 60)
+        """Tabela dywizji, w której aktualnie gra PINDOLZ (wykrywana automatycznie)."""
+        cached = self._cache_get("standings")
+        if cached is not None:
+            return cached
+        division = self.get_pindolz_division()
+        table = self._extract_table(self.get_standings(division), division)
+        if not self._has_pindolz(table):
+            # PINDOLZ nie ma w tej tabeli (np. po awansie) – szukamy go we wszystkich dywizjach
+            try:
+                for d in self.get_standings().get("divisions") or []:
+                    t = d.get("table") or []
+                    if self._has_pindolz(t):
+                        division, table = d.get("division") or division, t
+                        break
+            except Exception:
+                pass
+        if not table and division != DIVISION_6:
+            division = DIVISION_6
+            table = self._extract_table(self.get_standings(DIVISION_6), DIVISION_6)
+        self.current_division = division
+        if self.on_division:
+            try:
+                self.on_division(division)
+            except Exception:
+                pass
+        return self._cache_set("standings", table)
 
-    def get_division6_table(self) -> list[dict]:
-        """Alias używany przez bota – ta sama tabela co get_division_table."""
-        return self.get_division_table()
+    # zgodność wsteczna (bot wywołuje tę nazwę w wielu miejscach)
+    get_division6_table = get_division_table
 
     def get_pindolz_standing(self) -> dict | None:
         table = self.get_division_table()
@@ -194,6 +210,10 @@ class StarterLeagueClient:
         if winner is None:
             return None
         return winner == PINDOLZ_TEAM_ID
+
+    def get_division6_table(self) -> list[dict]:
+        """Alias używany przez bota – ta sama tabela co get_division_table."""
+        return self.get_division_table()
 
     def invalidate_cache(self, *keys: str) -> None:
         if not keys:
