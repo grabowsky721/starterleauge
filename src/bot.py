@@ -3167,6 +3167,50 @@ class PindolzBot(commands.Bot):
         except Exception:
             return {}
 
+
+    async def handle_sklad_confirm(self, interaction: discord.Interaction, mid: int, ans: str) -> None:
+        """Przycisk Gram / Nie mogę z DM składu."""
+        uid = interaction.user.id
+        try:
+            roster = load_lineup_ids(mid) if "load_lineup_ids" in dir() else self._lineup_ids(mid)
+        except Exception:
+            roster = self._lineup_ids(mid)
+        if roster and uid not in roster:
+            await interaction.response.send_message(
+                "Nie jesteś na liście składu tego meczu.",
+                ephemeral=True,
+            )
+            return
+        data = _lineup_confirms(int(mid))
+        data[str(uid)] = "yes" if ans == "yes" else "no"
+        _set_lineup_confirms(int(mid), data)
+        if ans == "yes":
+            msg = "✅ Zaznaczono **Gram** – dzięki!"
+        else:
+            msg = "❌ Zaznaczono **Nie mogę**. Kapitan dostanie info przy zbiórce."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except Exception:
+            try:
+                await interaction.followup.send(msg, ephemeral=True)
+            except Exception:
+                pass
+        # opcjonalnie powiadom kapitana o „Nie mogę”
+        if ans == "no":
+            try:
+                cap = db.get_config_int("captain_id")
+                if cap:
+                    u = await self.fetch_user_safe(int(cap))
+                    if u:
+                        await u.send(
+                            f"❌ <@{uid}> **nie może** grać (mecz `#{mid}`)."
+                        )
+            except Exception as e:
+                log("sklad", f"confirm DM kapitan: {e}")
+
     async def handle_poll_vote(self, interaction: discord.Interaction, mid: int, vote: str):
         info = self._poll_info(mid)
         ts = info.get("ts")
