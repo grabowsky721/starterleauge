@@ -1,26 +1,17 @@
-> **Wersja bota: `1.6.15`** · plik [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.16`** · plik [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
-Bot Discorda do śledzenia meczów **PINDOLZ** (ID 869) w [StarterLeague](https://starterleague.pl).
+Bot Discorda do śledzenia meczów **PINDOLZ** (ID 869).
+
+## Logo drużyn (1.6.16)
+
+Źródło: publiczne API `GET https://starterleague.pl/api/teams/{id}` → pole **`avatar`** (np. `uploads/….png`).
+
+W embedzie: logo PINDOLZ (autor) + logo przeciwnika (miniatura). Cache 6 h.
 
 ## Struktura
 
-```
-.env.example · README.md · VERSION · requirements.txt
-src/bot.py · client.py · db.py · embeds.py
-```
+`src/bot.py` · `client.py` · `db.py` · `embeds.py`
 
-## 1.6.15
-
-W embedach meczów (LIVE, wynik, prematch, start, nadchodzące):
-- **logo PINDOLZ** przy autorze karty
-- **logo przeciwnika** jako miniatura
-
-Źródło: pola API drużyny albo strona `/team/{id}` (cache 6 h).
-
-## GameHost
-
-`src/bot.py` · sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
-
-Team **869**.
+Sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN` · Team **869**.
