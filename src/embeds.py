@@ -1,12 +1,127 @@
 import discord
 import random
-from datetime import datetime
+import re
+import urllib.request
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Warsaw")
 PINDOLZ_ID = 869
 TEAM_URL = "https://starterleague.pl/team/869"
+SITE = "https://starterleague.pl"
 FOOTER = "PINDOLZ • StarterLeague"
+
+# cache: team_id -> (logo_url|None, expires_at)
+_logo_cache: dict[int, tuple[str | None, datetime]] = {}
+_LOGO_TTL = timedelta(hours=6)
+
+
+def _abs_media_url(path: str | None) -> str | None:
+    if not path or not isinstance(path, str):
+        return None
+    path = path.strip()
+    if path.startswith("https://") or path.startswith("http://"):
+        return path
+    if path.startswith("/"):
+        return SITE + path
+    return None
+
+
+def _logo_from_team_dict(team: dict | None) -> str | None:
+    if not isinstance(team, dict):
+        return None
+    for key in ("logo", "logoUrl", "logoURL", "image", "avatar", "icon", "badge"):
+        val = team.get(key)
+        if isinstance(val, str):
+            u = _abs_media_url(val)
+            if u:
+                return u
+        elif isinstance(val, dict):
+            u = _abs_media_url(val.get("url") or val.get("src"))
+            if u:
+                return u
+    return None
+
+
+def _logo_from_team_page(team_id: int) -> str | None:
+    """Fallback: logo z strony drużyny (og:image /uploads/)."""
+    now = datetime.now(TZ)
+    tid = int(team_id)
+    hit = _logo_cache.get(tid)
+    if hit and hit[1] > now:
+        return hit[0]
+    url = None
+    try:
+        req = urllib.request.Request(
+            f"{SITE}/team/{tid}",
+            headers={"User-Agent": "PINDOLZ-Bot/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        m = re.search(
+            r'property="og:image"\s+content="(https://starterleague\.pl/uploads/[^"]+)"',
+            html,
+        )
+        if not m:
+            m = re.search(
+                r'content="(https://starterleague\.pl/uploads/[^"]+\.(?:png|jpg|webp))"',
+                html,
+            )
+        if m:
+            url = m.group(1)
+        if not url:
+            m = re.search(r'src="(/uploads/\d+\.(?:png|jpg|webp))"', html)
+            if m:
+                url = SITE + m.group(1)
+    except Exception:
+        url = None
+    _logo_cache[tid] = (url, now + _LOGO_TTL)
+    return url
+
+
+def _team_logo(match: dict, side: str) -> str | None:
+    team = match.get(side) or {}
+    u = _logo_from_team_dict(team)
+    if u:
+        return u
+    tid = team.get("id")
+    if tid is None:
+        return None
+    try:
+        return _logo_from_team_page(int(tid))
+    except Exception:
+        return None
+
+
+def _pindolz_side(match: dict) -> str:
+    t1 = match.get("team1") or {}
+    try:
+        if int(t1.get("id") or 0) == PINDOLZ_ID:
+            return "team1"
+    except Exception:
+        pass
+    name = (t1.get("name") or "").upper()
+    if "PINDOL" in name:
+        return "team1"
+    return "team2"
+
+
+def _attach_match_logos(embed: discord.Embed, match: dict) -> discord.Embed:
+    """Logo PINDOLZ (author), logo przeciwnika (thumbnail)."""
+    try:
+        p_side = _pindolz_side(match)
+        o_side = "team2" if p_side == "team1" else "team1"
+        p_logo = _team_logo(match, p_side)
+        o_logo = _team_logo(match, o_side)
+        p_name = _team_name(match, p_side)
+        if p_logo:
+            embed.set_author(name=p_name or "PINDOLZ", icon_url=p_logo, url=TEAM_URL)
+        if o_logo:
+            embed.set_thumbnail(url=o_logo)
+    except Exception:
+        pass
+    return embed
+
 DIVISION = "Starter Division 6"  # aktualizowane automatycznie przez bota (wykrywanie dywizji)
 
 
@@ -186,6 +301,8 @@ def upcoming_embed(matches: list[dict]) -> discord.Embed:
             inline=False,
         )
     _add_links(embed)
+    if matches:
+        _attach_match_logos(embed, matches[0])
     return embed
 
 
@@ -199,7 +316,7 @@ def single_upcoming_embed(match: dict) -> discord.Embed:
     embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
     embed.add_field(name="🎯 Format", value=f"Bo{match.get('bestOf') or '?'}", inline=True)
     _add_links(embed, match)
-    return embed
+    return _attach_match_logos(embed, match)
 
 
 def prematch_embed(
@@ -241,7 +358,7 @@ def prematch_embed(
     if lineup:
         embed.add_field(name="👥 Skład", value="\n".join(_player_line(u, nicks) for u in lineup[:10]), inline=False)
     _add_links(embed, match)
-    return embed
+    return _attach_match_logos(embed, match)
 
 
 def history_embed(matches: list[dict], limit: int = 8) -> discord.Embed:
@@ -306,7 +423,7 @@ def result_embed(
             inline=False,
         )
     _add_links(embed, match)
-    return embed
+    return _attach_match_logos(embed, match)
 
 
 def live_embed(match: dict) -> discord.Embed:
@@ -329,7 +446,7 @@ def live_embed(match: dict) -> discord.Embed:
         )
     embed.set_footer(text=match.get("division") or FOOTER)
     _add_links(embed, match)
-    return embed
+    return _attach_match_logos(embed, match)
 
 
 def match_started_embed(match: dict) -> discord.Embed:
@@ -341,7 +458,7 @@ def match_started_embed(match: dict) -> discord.Embed:
     embed.add_field(name="🏷️ Dywizja", value=match.get("division") or "-", inline=True)
     embed.add_field(name="🎯 Format", value=f"Bo{match.get('bestOf') or '?'}", inline=True)
     _add_links(embed, match)
-    return embed
+    return _attach_match_logos(embed, match)
 
 
 def match_ended_embed(
