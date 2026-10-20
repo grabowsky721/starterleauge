@@ -1,11 +1,26 @@
-> **Wersja bota: `1.6.18`** · `/wersja`
+> **Wersja bota: `1.6.19`** · `/wersja`
 
 # PINDOLZ Discord Bot
 
-## Fix 1.6.18
-Przycisk **Gram / Nie mogę** – dopisane `handle_sklad_confirm`.
+## Grafiki meczów (Cloudflare Workers AI)
 
-## Pliki
-`src/bot.py` · `client.py` · `db.py` · `embeds.py`
+- **~24 h przed meczem** – zapowiedź + obraz AI na kanał główny
+- **Po wyniku** – obraz AI na kanał **LIVE**
 
-GameHost: Auto Update `1` · sekrety: `DISCORD_BOT_TOKEN`, `STARTERLEAGUE_API_TOKEN`
+Model: `@cf/black-forest-labs/flux-1-schnell` (darmowy limit dzienny Workers AI).
+
+### Sekrety na GameHost
+
+```
+CLOUDFLARE_ACCOUNT_ID=...
+CLOUDFLARE_API_TOKEN=...
+```
+
+Token: Cloudflare Dashboard → Workers AI → Use REST API → Create Token  
+Account ID: ten sam ekran.
+
+Bez tych sekretów bot działa normalnie (tylko bez grafik AI).
+
+## Reszta
+
+`DISCORD_BOT_TOKEN` · `STARTERLEAGUE_API_TOKEN` · Team **869**
