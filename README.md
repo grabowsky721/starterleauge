@@ -1,9 +1,11 @@
-> **Wersja bota: `1.6.23`** · [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.24`** · [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
-## 1.6.23
-**`/zbiorka`** (sztab) — ręczna zbiórka: na kanale lista kto nie potwierdził **Gram** + DM do tych osób.
+## 1.6.24
+Anty-spam **zapowiedzi 24h**: na dany mecz (`#id`) max **jedna** grafika/zapowiedź — także gdy termin się przesunie.
+
+Klucz SQLite: `preview24h_{matchId}` (nie czyszczony przy zmianie terminu).
 
 ## Sekrety
 `DISCORD_BOT_TOKEN` · `STARTERLEAGUE_API_TOKEN` · opcjonalnie `CLOUDFLARE_*`
