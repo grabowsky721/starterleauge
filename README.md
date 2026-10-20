@@ -1,26 +1,18 @@
-> **Wersja bota: `1.6.19`** · `/wersja`
+> **Wersja bota: `1.6.20`** · `/wersja`
 
 # PINDOLZ Discord Bot
 
-## Grafiki meczów (Cloudflare Workers AI)
+## Aktualizacje z GitHuba
 
-- **~24 h przed meczem** – zapowiedź + obraz AI na kanał główny
-- **Po wyniku** – obraz AI na kanał **LIVE**
+Co godzinę bot sprawdza plik `VERSION` w repo.
+Gdy jest nowsza wersja → **DM tylko do właściciela serwera** (nie na kanał).
 
-Model: `@cf/black-forest-labs/flux-1-schnell` (darmowy limit dzienny Workers AI).
+Funkcja: `feat_updates` (domyślnie włączona; wyłącz: `/ustawienia`).
 
-### Sekrety na GameHost
+## Cloudflare (grafiki)
 
-```
-CLOUDFLARE_ACCOUNT_ID=...
-CLOUDFLARE_API_TOKEN=...
-```
+`CLOUDFLARE_ACCOUNT_ID` · `CLOUDFLARE_API_TOKEN`
 
-Token: Cloudflare Dashboard → Workers AI → Use REST API → Create Token  
-Account ID: ten sam ekran.
-
-Bez tych sekretów bot działa normalnie (tylko bez grafik AI).
-
-## Reszta
+## Sekrety
 
 `DISCORD_BOT_TOKEN` · `STARTERLEAGUE_API_TOKEN` · Team **869**
