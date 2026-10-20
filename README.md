@@ -2,16 +2,15 @@
 
 # PINDOLZ Discord Bot
 
-## Aktualizacje z GitHuba
+## Aktualizacje GitHub
 
-Co godzinę bot sprawdza plik `VERSION` w repo.
-Gdy jest nowsza wersja → **DM tylko do właściciela serwera** (nie na kanał).
+Co godzinę bot czyta `VERSION` z repo. Gdy jest nowsza wersja → **DM tylko do właściciela serwera** (nie na kanał).
 
-Funkcja: `feat_updates` (domyślnie włączona; wyłącz: `/ustawienia`).
-
-## Cloudflare (grafiki)
+## Cloudflare grafiki
 
 `CLOUDFLARE_ACCOUNT_ID` · `CLOUDFLARE_API_TOKEN`
+
+https://dash.cloudflare.com/?to=/:account/ai/workers-ai
 
 ## Sekrety
 
