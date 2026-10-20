@@ -1,11 +1,10 @@
-> **Wersja bota: `1.6.29`** · [`VERSION`](VERSION) · `/wersja`
+> **Wersja bota: `1.6.30`** · [`VERSION`](VERSION) · `/wersja`
 
 # PINDOLZ Discord Bot
 
-## 1.6.29
-- Wszystkie wywołania API przez `api_call` (log błędów, bez zabijania pętli)
-- Jedna funkcja przeciwnika (po **ID** drużyny)
-- `User-Agent: PINDOLZ-Bot/1.6` w kliencie API
+## 1.6.30
+- Cache **upcoming/tabela**: przy awarii API zostaje **ostatni dobry** wynik (nie pusta lista)
+- **LIVE**: `None` z API = błąd + backoff (nie „brak meczów”)
 
 ## Sekrety
 `DISCORD_BOT_TOKEN` · `STARTERLEAGUE_API_TOKEN` · opcjonalnie `CLOUDFLARE_*`
