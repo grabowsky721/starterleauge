@@ -24,6 +24,7 @@ class StarterLeagueClient:
             {
                 "Authorization": f"Bearer {self.token}",
                 "Accept": "application/json",
+                "User-Agent": "PINDOLZ-Bot/1.6",
             }
         )
         self.current_division: str = DIVISION_6
@@ -108,116 +109,95 @@ class StarterLeagueClient:
         if cached is not None:
             return cached
         data = self.get_live_raw()
-        items = data.get("items") or []
-        result = [m for m in items if self._is_pindolz(m)]
-        return self._cache_set("live", result)
+        items = data.get("items") or data.get("matches") or []
+        if isinstance(data, list):
+            items = data
+        out = [m for m in items if isinstance(m, dict) and self._is_pindolz(m)]
+        return self._cache_set("live", out)
 
-    def get_standings(self, division: str | None = None) -> dict:
-        params = {"division": division} if division else None
-        return self._get("/standings", params=params)
+    def get_standings(self, division: str | None = None) -> list:
+        div = division or self.current_division
+        cache_key = f"standings:{div}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+        data = self._get("/standings", params={"division": div})
+        table = self._extract_table(data)
+        return self._cache_set(cache_key, table, ttl=self._cache_ttl.get("standings", 45))
 
     def get_pindolz_division(self) -> str:
-        """Dywizja PINDOLZ wykrywana z meczów (live → nadchodzące → historia)."""
-        cached = self._cache_get("division")
-        if cached:
-            return cached
-        name = None
-        for fetch in (self.get_pindolz_live, self.get_pindolz_upcoming, self.get_pindolz_history):
-            try:
-                for m in fetch():
-                    if m.get("division"):
-                        name = m["division"]
-                        break
-            except Exception:
-                continue
-            if name:
-                break
-        return self._cache_set("division", name or DIVISION_6, ttl=600)
+        return self.current_division
 
-    @staticmethod
-    def _extract_table(data: dict, division: str) -> list[dict]:
-        divisions = data.get("divisions") or []
-        for d in divisions:
-            if d.get("division") == division:
-                return d.get("table") or []
-        key = division.lower().replace(" ", "")
-        for d in divisions:
-            if (d.get("division") or "").lower().replace(" ", "") == key:
-                return d.get("table") or []
+    def _extract_table(self, data) -> list:
+        if isinstance(data, list):
+            return data
+        if not isinstance(data, dict):
+            return []
+        for key in ("standings", "items", "table", "rows"):
+            if isinstance(data.get(key), list):
+                return data[key]
         return []
 
-    @staticmethod
-    def _has_pindolz(table: list[dict]) -> bool:
-        for row in table:
+    def _has_pindolz(self, table: list) -> bool:
+        for row in table or []:
             team = row.get("team") or {}
-            if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
+            if team.get("id") == PINDOLZ_TEAM_ID:
+                return True
+            name = (team.get("name") or "").upper()
+            if name == "PINDOLZ":
                 return True
         return False
 
-    def get_division_table(self) -> list[dict]:
-        """Tabela dywizji, w której aktualnie gra PINDOLZ (wykrywana automatycznie)."""
-        cached = self._cache_get("standings")
-        if cached is not None:
-            return cached
-        division = self.get_pindolz_division()
-        table = self._extract_table(self.get_standings(division), division)
-        if not self._has_pindolz(table):
-            # PINDOLZ nie ma w tej tabeli (np. po awansie) – szukamy go we wszystkich dywizjach
-            try:
-                for d in self.get_standings().get("divisions") or []:
-                    t = d.get("table") or []
-                    if self._has_pindolz(t):
-                        division, table = d.get("division") or division, t
-                        break
-            except Exception:
-                pass
-        if not table and division != DIVISION_6:
-            division = DIVISION_6
-            table = self._extract_table(self.get_standings(DIVISION_6), DIVISION_6)
-        self.current_division = division
-        if self.on_division:
-            try:
-                self.on_division(division)
-            except Exception:
-                pass
-        return self._cache_set("standings", table)
+    def get_division_table(self, division: str | None = None) -> list:
+        div = division or self.current_division
+        table = self.get_standings(div)
+        if table and self._has_pindolz(table):
+            if self.on_division:
+                try:
+                    self.on_division(div)
+                except Exception:
+                    pass
+            return table
+        # fallback: spróbuj Division 6
+        if div != DIVISION_6:
+            table6 = self.get_standings(DIVISION_6)
+            if table6 and self._has_pindolz(table6):
+                self.current_division = DIVISION_6
+                if self.on_division:
+                    try:
+                        self.on_division(DIVISION_6)
+                    except Exception:
+                        pass
+                return table6
+        return table or []
 
-    # zgodność wsteczna (bot wywołuje tę nazwę w wielu miejscach)
-    get_division6_table = get_division_table
-
-    def get_pindolz_standing(self) -> dict | None:
+    def get_pindolz_standing(self):
         table = self.get_division_table()
-        for row in table:
+        for row in table or []:
             team = row.get("team") or {}
             if team.get("id") == PINDOLZ_TEAM_ID or (team.get("name") or "").upper() == "PINDOLZ":
                 return row
         return None
 
-    def get_form(self, history: list[dict] | None = None, limit: int = 5) -> str:
-        if history is None:
-            history = self.get_pindolz_history()
-        letters: list[str] = []
-        for m in history[:limit]:
-            winner = m.get("winnerTeamId")
-            if winner is None:
-                letters.append("?")
-                continue
-            letters.append("W" if winner == PINDOLZ_TEAM_ID else "L")
-        return "".join(reversed(letters))
+    def get_form(self, limit: int = 5) -> list[dict]:
+        hist = self.get_pindolz_history()
+        return hist[:limit] if hist else []
 
     def did_pindolz_win(self, match: dict) -> bool | None:
-        winner = match.get("winnerTeamId")
-        if winner is None:
+        w = match.get("winnerTeamId")
+        if w is None:
             return None
-        return winner == PINDOLZ_TEAM_ID
+        try:
+            return int(w) == PINDOLZ_TEAM_ID
+        except Exception:
+            return None
 
-    def get_division6_table(self) -> list[dict]:
-        """Alias używany przez bota – ta sama tabela co get_division_table."""
+    def get_division6_table(self) -> list:
+        """Alias wstecznej kompatybilności."""
         return self.get_division_table()
 
-    def invalidate_cache(self, *keys: str) -> None:
-        if not keys:
+    def invalidate_cache(self, key: str | None = None) -> None:
+        if key is None:
             self._cache.clear()
-            return
-        for k in keys:
-            self._cache.pop(k, None)
+        else:
+            self._cache.pop(key, None)
