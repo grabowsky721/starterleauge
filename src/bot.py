@@ -232,7 +232,13 @@ def generate_cf_image(prompt: str, steps: int = 4) -> bytes | None:
         if r.status_code >= 400:
             log("cf-image", f"HTTP {r.status_code}: {r.text[:240]}")
             return None
-        data = r.json()
+        try:
+            data = r.json()
+        except Exception:
+            log("cf-image", "odpowiedź nie jest JSON")
+            return None
+        if not isinstance(data, dict):
+            return None
         img_b64 = (data.get("result") or {}).get("image") or data.get("image")
         if not img_b64:
             log("cf-image", f"brak image w odpowiedzi: {str(data)[:200]}")
@@ -268,7 +274,11 @@ def match_image_prompt(match: dict, kind: str = "preview") -> str:
 
 def log(tag: str, msg: str) -> None:
     """Jednolity log do konsoli GameHost."""
-    print(f"[{tag}] {msg}")
+    try:
+        ts = datetime.now(TZ).strftime("%H:%M:%S")
+    except Exception:
+        ts = "--:--:--"
+    print(f"[{ts}] [{tag}] {msg}")
 
 
 def safe_int(val, default: int | None = None) -> int | None:
@@ -1025,6 +1035,32 @@ def sklad_confirm_view(mid: int) -> discord.ui.View:
     return view
 
 
+
+async def _safe_reply(interaction: discord.Interaction, content: str, *, ephemeral: bool = True) -> None:
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content, ephemeral=ephemeral)
+    except Exception:
+        try:
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        except Exception:
+            pass
+
+
+async def _disable_sklad_buttons(message: discord.Message | None) -> None:
+    if message is None:
+        return
+    try:
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(label="Gram", style=discord.ButtonStyle.success, emoji="✅", disabled=True))
+        view.add_item(discord.ui.Button(label="Nie mogę", style=discord.ButtonStyle.danger, emoji="❌", disabled=True))
+        await message.edit(view=view)
+    except Exception:
+        pass
+
+
 def _sklad_preview_embed(m: dict, mid: int, selected_ids: list[int]) -> discord.Embed:
     """Embed panelu składu (interfejs)."""
     opp = _match_opponent(m)
@@ -1659,12 +1695,17 @@ async def _build_captain_panel_embed() -> discord.Embed:
 
 
 def _match_opponent(m: dict) -> str:
+    """Nazwa przeciwnika PINDOLZ (po id, fallback po nazwie)."""
     try:
         t1, t2 = m.get("team1") or {}, m.get("team2") or {}
-        n1, n2 = t1.get("name") or "?", t2.get("name") or "?"
+        if t1.get("id") == PINDOLZ_TEAM_ID:
+            return (t2.get("name") or "???").strip() or "???"
+        if t2.get("id") == PINDOLZ_TEAM_ID:
+            return (t1.get("name") or "???").strip() or "???"
+        n1, n2 = (t1.get("name") or "?").strip(), (t2.get("name") or "?").strip()
         return n2 if "pindolz" in n1.lower() else n1
     except Exception:
-        return "?"
+        return "???"
 
 
 def _lineup_status_lists(mid: int) -> tuple[list[int], list[str], list[str], list[str]]:
@@ -1731,7 +1772,7 @@ class PindolzBot(commands.Bot):
         try:
             self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, TreningStaffButton, TreningRateButton, TreningRateStaffButton, MvpButton)
         except Exception as e:
-            print(f"[start] dynamic items: {e}")
+            log("start", f"dynamic items: {e}")
         asyncio.create_task(self._soft_start_tasks())
         asyncio.create_task(self._reschedule_training_polls())
 
@@ -2070,11 +2111,7 @@ class PindolzBot(commands.Bot):
 
     @staticmethod
     def _opponent(match: dict) -> str:
-        t1 = match.get("team1") or {}
-        t2 = match.get("team2") or {}
-        if t1.get("id") == PINDOLZ_TEAM_ID:
-            return t2.get("name") or "???"
-        return t1.get("name") or "???"
+        return _match_opponent(match)
 
     async def _edit_or_send(self, channel, embed, msg_id, ch_id, view=None):
         """Edytuj istniejącą wiadomość albo wyślij nową. Zwraca (msg_id, ch_id) lub (None, None)."""
@@ -2153,7 +2190,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            table = await asyncio.to_thread(self.api.get_division6_table)
+            table = await self.api_call(self.api.get_division6_table)
         except Exception as e:
             print(f"[table] API error: {e}")
             return
@@ -2198,16 +2235,16 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            history = await asyncio.to_thread(self.api.get_pindolz_history)
-            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+            history = await self.api_call(self.api.get_pindolz_history)
+            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
         except Exception as e:
             log("daily", f"API error: {e}")
             return
         now = datetime.now(TZ)
-        form = await asyncio.to_thread(self.api.get_form, history, limit=5)
+        form = await self.api_call(self.api.get_form, history, limit=5)
         standing = None
         try:
-            standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
+            standing = (await self.api_call(self.api.get_pindolz_standing))
         except Exception:
             pass
         cutoff = now - timedelta(days=14)
@@ -2260,6 +2297,10 @@ class PindolzBot(commands.Bot):
                 log("sklad", f"zamknięto potwierdzenia mid={mid}")
             except Exception:
                 pass
+            try:
+                self.api.invalidate_cache()
+            except Exception:
+                pass
             if row and row.get("msg_live_id"):
                 try:
                     live_ch = await self.get_channel_safe(row.get("msg_live_ch"))
@@ -2294,8 +2335,13 @@ class PindolzBot(commands.Bot):
                         )
 
                         except Exception as e:
-                            print(f"[schedule] send error: {e}")
+                            log("schedule", f"send error: {e}")
                         # anty-spam: NIE czyścimy preview24h_{mid} — druga grafika 24h się nie wyśle
+                        try:
+                            self._upcoming_cache = None
+                            self.api.invalidate_cache("upcoming")
+                        except Exception:
+                            pass
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid))
@@ -2304,34 +2350,29 @@ class PindolzBot(commands.Bot):
     PREMATCH_MINUTES = 30
 
     async def _upcoming_cached(self) -> list:
-        """Upcoming mecze – cache 10 min, API w wątku (nie blokuje event loop)."""
+        """Upcoming mecze – cache 10 min; przy awarii API zwraca ostatni dobry cache."""
         now = datetime.now(TZ)
         if self._upcoming_cache and (now - self._upcoming_cache[0]) < timedelta(minutes=10):
             return self._upcoming_cache[1]
-        try:
-            data = await asyncio.to_thread(self.api.get_pindolz_upcoming)
-        except Exception as e:
-            log("api", f"upcoming: {e}")
+        data = await self.api_call(self.api.get_pindolz_upcoming, err_tag="upcoming")
+        if data is None:
             return list(self._upcoming_cache[1]) if self._upcoming_cache else []
-        self._upcoming_cache = (now, data or [])
+        self._upcoming_cache = (now, list(data))
         return self._upcoming_cache[1]
 
     async def _table_cached(self) -> list:
-        """Tabela dywizji – cache 5 min."""
+        """Tabela dywizji – cache 5 min; przy awarii ostatni dobry wynik."""
         now = datetime.now(TZ)
         cache = getattr(self, "_table_cache", None)
         if cache and (now - cache[0]) < timedelta(minutes=5):
             return cache[1]
-        try:
-            data = await asyncio.to_thread(self.api.get_division6_table)
-        except Exception as e:
-            log("api", f"table: {e}")
+        data = await self.api_call(self.api.get_division6_table, err_tag="table")
+        if data is None:
             return list(cache[1]) if cache else []
-        self._table_cache = (now, data or [])
+        self._table_cache = (now, list(data))
         return self._table_cache[1]
 
-    @tasks.loop(minutes=1)
-    @guarded
+
     async def prematch_check(self):
         if quiet_now():
             return
@@ -2424,7 +2465,7 @@ class PindolzBot(commands.Bot):
             # dane do karty prematch (60/30/10)
             form = standing = opp_standing = None
             try:
-                form = await asyncio.to_thread(self.api.get_form, limit=5)
+                form = await self.api_call(self.api.get_form, limit=5)
             except Exception:
                 pass
             try:
@@ -2492,16 +2533,15 @@ class PindolzBot(commands.Bot):
         if not channel:
             self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
             return
-        try:
-            lives = await asyncio.to_thread(self.api.get_pindolz_live)
-            self._live_errors = 0
-        except Exception as e:
+        lives = await self.api_call(self.api.get_pindolz_live, err_tag="live")
+        if lives is None:
             self._live_errors = getattr(self, "_live_errors", 0) + 1
-            log("live", f"API error ({self._live_errors}): {e}")
+            log("live", f"API error / brak danych ({self._live_errors})")
             backoff = min(30, LIVE_INTERVAL_IDLE * (1 + self._live_errors // 2))
             if self.live_check.seconds != backoff:
                 self.live_check.change_interval(seconds=backoff)
             return
+        self._live_errors = 0
         target = LIVE_INTERVAL_ACTIVE if lives else LIVE_INTERVAL_IDLE
         if self.live_check.seconds != target:
             self.live_check.change_interval(seconds=target)
@@ -2540,7 +2580,7 @@ class PindolzBot(commands.Bot):
             match_data = None
             history = []
             try:
-                history = await asyncio.to_thread(self.api.get_pindolz_history)
+                history = await self.api_call(self.api.get_pindolz_history)
                 for h in history:
                     if h.get("id") == mid:
                         match_data = h
@@ -2548,10 +2588,10 @@ class PindolzBot(commands.Bot):
             except Exception:
                 pass
             if match_data:
-                form = await asyncio.to_thread(self.api.get_form, history, limit=5) if history else None
+                form = await self.api_call(self.api.get_form, history, limit=5) if history else None
                 standing = None
                 try:
-                    standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
+                    standing = (await self.api_call(self.api.get_pindolz_standing))
                 except Exception:
                     pass
                 score = match_data.get("score") or {}
@@ -2841,7 +2881,7 @@ class PindolzBot(commands.Bot):
         # konflikt z meczem ligowym?
         conflict_note = ""
         try:
-            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
             for mm in upcoming or []:
                 mdt = embeds._match_dt(mm)
                 if not mdt:
@@ -3006,6 +3046,12 @@ class PindolzBot(commands.Bot):
         ch_id = db.get_config(f"preview24h_ch_{mid}")
         if not msg_id or not ch_id:
             return
+        # throttle: max 1 edycja / 3 s na mecz
+        now_ts = datetime.now(TZ).timestamp()
+        last_map = self.__dict__.setdefault("_preview24_edit_ts", {})
+        if now_ts - last_map.get(int(mid), 0) < 3:
+            return
+        last_map[int(mid)] = now_ts
         try:
             ch = await self.get_channel_safe(int(ch_id))
             if not ch:
@@ -3144,7 +3190,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            history = (await asyncio.to_thread(self.api.get_pindolz_history))
+            history = (await self.api_call(self.api.get_pindolz_history))
         except Exception as e:
             log("weekly", f"API error: {e}")
             return
@@ -3169,7 +3215,7 @@ class PindolzBot(commands.Bot):
                 losses += 1
         standing = None
         try:
-            standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
+            standing = (await self.api_call(self.api.get_pindolz_standing))
         except Exception:
             pass
         await channel.send(embed=embeds.weekly_summary_embed(week_matches, wins, losses, standing))
@@ -3231,7 +3277,7 @@ class PindolzBot(commands.Bot):
 
         # 3. LIVE – ma pierwszeństwo
         try:
-            lives = await asyncio.to_thread(self.api.get_pindolz_live)
+            lives = await self.api_call(self.api.get_pindolz_live)
         except Exception:
             lives = []
         if lives:
@@ -3249,7 +3295,7 @@ class PindolzBot(commands.Bot):
 
         # 1 + 2. Odliczanie i „dziś gramy"
         try:
-            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
         except Exception:
             upcoming = []
         nxt = None
@@ -3266,7 +3312,7 @@ class PindolzBot(commands.Bot):
 
         # 8. Seria wygranych / porażek
         try:
-            history = await asyncio.to_thread(self.api.get_pindolz_history)
+            history = await self.api_call(self.api.get_pindolz_history)
         except Exception:
             history = []
         streak = 0
@@ -3291,7 +3337,7 @@ class PindolzBot(commands.Bot):
 
         # Winrate i strata do lidera (z tabeli)
         try:
-            table = await asyncio.to_thread(self.api.get_division6_table)
+            table = await self.api_call(self.api.get_division6_table)
         except Exception:
             table = []
         us = next((r for r in table if ((r.get("team") or {}).get("name") or "").upper() == "PINDOLZ"), None)
@@ -3447,37 +3493,15 @@ class PindolzBot(commands.Bot):
         uid = interaction.user.id
         # po meczu przyciski nie działają
         if db.get_config(f"sklad_closed_{int(mid)}"):
-            try:
-                await interaction.response.send_message(
-                    "Mecz już się zakończył — potwierdzenia składu są zamknięte.",
-                    ephemeral=True,
-                )
-            except Exception:
-                pass
-            try:
-                if interaction.message:
-                    view = discord.ui.View()
-                    for item in (interaction.message.components or []):
-                        pass
-                    # wyłącz przyciski na tej wiadomości DM
-                    disabled = discord.ui.View(timeout=None)
-                    b1 = discord.ui.Button(label="Gram", style=discord.ButtonStyle.success, emoji="✅", disabled=True)
-                    b2 = discord.ui.Button(label="Nie mogę", style=discord.ButtonStyle.danger, emoji="❌", disabled=True)
-                    disabled.add_item(b1)
-                    disabled.add_item(b2)
-                    await interaction.message.edit(view=disabled)
-            except Exception:
-                pass
-            return
-        try:
-            roster = load_lineup_ids(mid) if "load_lineup_ids" in dir() else self._lineup_ids(mid)
-        except Exception:
-            roster = self._lineup_ids(mid)
-        if roster and uid not in roster:
-            await interaction.response.send_message(
-                "Nie jesteś na liście składu tego meczu.",
-                ephemeral=True,
+            await _safe_reply(
+                interaction,
+                "Mecz już się zakończył — potwierdzenia składu są zamknięte.",
             )
+            await _disable_sklad_buttons(interaction.message)
+            return
+        roster = self._lineup_ids(mid)
+        if roster and uid not in roster:
+            await _safe_reply(interaction, "Nie jesteś na liście składu tego meczu.")
             return
         data = _lineup_confirms(int(mid))
         data[str(uid)] = "yes" if ans == "yes" else "no"
@@ -3486,16 +3510,7 @@ class PindolzBot(commands.Bot):
             msg = "✅ Zaznaczono **Gram** – dzięki!"
         else:
             msg = "❌ Zaznaczono **Nie mogę**. Kapitan dostanie info przy zbiórce."
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(msg, ephemeral=True)
-        except Exception:
-            try:
-                await interaction.followup.send(msg, ephemeral=True)
-            except Exception:
-                pass
+        await _safe_reply(interaction, msg)
         # powiadom kapitana o „Nie mogę”
         if ans == "no":
             try:
@@ -3559,7 +3574,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
         except Exception as e:
             log("poll", f"API error: {e}")
             return
@@ -3649,7 +3664,7 @@ class PindolzBot(commands.Bot):
             if archive:
                 await thread.edit(archived=True)
         except Exception as e:
-            print(f"[thread] update error: {e}")
+            log("thread", f"update error: {e}")
 
     # ---------- WYDARZENIE SERWERA DISCORD ----------
     @tasks.loop(minutes=5)
@@ -3662,7 +3677,7 @@ class PindolzBot(commands.Bot):
         if not guild:
             return
         try:
-            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
         except Exception as e:
             log("event", f"API error: {e}")
             return
@@ -3876,7 +3891,7 @@ class PindolzBot(commands.Bot):
         try:
             remote = await asyncio.to_thread(self._fetch_remote_version)
         except Exception as e:
-            print(f"[update] błąd sprawdzania wersji: {e}")
+            log("update", f"błąd sprawdzania wersji: {e}")
             return
         rt = self._ver_tuple(remote or "")
         if not rt or rt <= self._ver_tuple(BOT_VERSION):
@@ -3941,7 +3956,7 @@ class PindolzBot(commands.Bot):
                     await u.send(text)
                     sent.add(int(oid))
             except Exception as e:
-                print(f"[alert] DM właściciel serwera {oid}: {e}")
+                log("alert", f"DM właściciel serwera {oid}: {e}")
         if sent:
             return
         try:
@@ -3949,7 +3964,7 @@ class PindolzBot(commands.Bot):
             if info.owner is not None:
                 await info.owner.send(text)
         except Exception as e:
-            print(f"[alert] nie udało się wysłać DM: {e}")
+            log("alert", f"nie udało się wysłać DM: {e}")
 
     @staticmethod
     def _api_error_text(err: Exception | None) -> str:
@@ -3969,7 +3984,7 @@ class PindolzBot(commands.Bot):
         if not feature_on("alerts"):
             return
         try:
-            await asyncio.to_thread(self.api.get_pindolz_live)
+            await self.api_call(self.api.get_pindolz_live)
         except Exception as e:
             self._api_fail += 1
             print(f"[api_watch] błąd ({self._api_fail}): {e}")
