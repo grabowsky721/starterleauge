@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import functools
 import json
 import os
@@ -44,6 +46,9 @@ BOT_VERSION = load_version()
 GITHUB_REPO = "grabowsky721/starterleauge"
 GITHUB_BRANCH = "main"
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+CF_ACCOUNT_ID = (os.getenv("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+CF_API_TOKEN = (os.getenv("CLOUDFLARE_API_TOKEN") or "").strip()
+CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 TZ = ZoneInfo("Europe/Warsaw")
 
 TABLE_UPDATE_TIMES = [
@@ -198,6 +203,66 @@ FEATURES = {
 
 def feature_on(name: str) -> bool:
     return db.get_config(f"feat_{name}") != "0"
+
+
+
+def cf_image_enabled() -> bool:
+    return bool(CF_ACCOUNT_ID and CF_API_TOKEN)
+
+
+def generate_cf_image(prompt: str, steps: int = 4) -> bytes | None:
+    """Cloudflare Workers AI FLUX – zwraca JPEG bytes albo None."""
+    if not cf_image_enabled():
+        return None
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
+        f"/ai/run/{CF_IMAGE_MODEL}"
+    )
+    try:
+        r = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {CF_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={"prompt": (prompt or "")[:2000], "steps": int(steps)},
+            timeout=90,
+        )
+        if r.status_code >= 400:
+            log("cf-image", f"HTTP {r.status_code}: {r.text[:240]}")
+            return None
+        data = r.json()
+        img_b64 = (data.get("result") or {}).get("image") or data.get("image")
+        if not img_b64:
+            log("cf-image", f"brak image w odpowiedzi: {str(data)[:200]}")
+            return None
+        return base64.b64decode(img_b64)
+    except Exception as e:
+        log("cf-image", str(e))
+        return None
+
+
+def match_image_prompt(match: dict, kind: str = "preview") -> str:
+    """Prompt do grafiki meczowej (esport CS2)."""
+    try:
+        t1 = embeds._team_name(match, "team1")
+        t2 = embeds._team_name(match, "team2")
+    except Exception:
+        t1, t2 = "PINDOLZ", "Opponent"
+    if kind == "result":
+        try:
+            score = embeds._score_str(match)
+        except Exception:
+            s = match.get("score") or {}
+            score = f"{s.get('team1', '?')}:{s.get('team2', '?')}"
+        return (
+            f"Epic esports CS2 match result poster, dark cyber arena, neon orange and blue lights, "
+            f"bold text '{t1} {score} {t2}', championship graphic, high quality, cinematic, no watermark"
+        )
+    return (
+        f"Epic esports CS2 match announcement poster, dark cyber arena, neon lights, "
+        f"bold text '{t1} vs {t2}', coming soon, championship graphic, high quality, cinematic, no watermark"
+    )
 
 
 def log(tag: str, msg: str) -> None:
@@ -2167,6 +2232,17 @@ class PindolzBot(commands.Bot):
             msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None, view=gg_view(mid))
             await self._react_result(ch_id, msg_id, m)
             await self._post_win_gif(ch_id, m)
+            # grafika wyniku na kanał LIVE (Cloudflare Workers AI)
+            try:
+                live_ch = await self.get_channel_safe(self._live_channel_id())
+                await self.send_match_image(
+                    live_ch or channel,
+                    m,
+                    kind="result",
+                    content="🏁 **Wynik meczu**",
+                )
+            except Exception as e:
+                log("cf-image", f"result: {e}")
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             await self._start_mvp_vote(channel, m)
             try:
@@ -2266,18 +2342,24 @@ class PindolzBot(commands.Bot):
                 stage = 30
             elif timedelta(minutes=30) < delta <= timedelta(minutes=60):
                 stage = 60
+            elif timedelta(hours=23) < delta <= timedelta(hours=25):
+                stage = 1440  # ~24 h przed meczem
             else:
                 continue
             key = f"prematch{stage}_{mid}"
             if db.get_config(key):
                 continue
-            # feature flags: 60→prematch1h, 30/10→prematch
-            feat = "prematch1h" if stage == 60 else "prematch"
-            if not feature_on(feat) and stage != 10:
-                # 10 min zawsze przy włączonym prematch
-                continue
-            if stage == 10 and not feature_on("prematch"):
-                continue
+            # feature flags: 1440/60→prematch1h, 30/10→prematch
+            if stage == 1440:
+                feat = "prematch1h" if feature_on("prematch1h") else "prematch"
+                if not feature_on(feat) and not feature_on("prematch"):
+                    continue
+            else:
+                feat = "prematch1h" if stage == 60 else "prematch"
+                if not feature_on(feat) and stage != 10:
+                    continue
+                if stage == 10 and not feature_on("prematch"):
+                    continue
             db.set_config(key, "1")
             form = standing = opp_standing = None
             try:
@@ -2295,6 +2377,29 @@ class PindolzBot(commands.Bot):
                         opp_standing = row
             except Exception:
                 pass
+            # 24h: grafika AI + krótki embed (bez zbiórki DM)
+            if stage == 1440:
+                try:
+                    opp = self._opponent(m)
+                    when = embeds._match_dt(m)
+                    when_s = when.strftime("%d.%m %H:%M") if when else "nie ustalono terminu"
+                    if channel:
+                        await channel.send(
+                            embed=embeds._base(
+                                "📅 Mecz za ok. 24 godziny",
+                                getattr(embeds, "C_UPCOMING", 0xF59E0B),
+                                f"**PINDOLZ** vs **{opp}** · {when_s}",
+                            )
+                        )
+                    await self.send_match_image(
+                        channel,
+                        m,
+                        kind="preview",
+                        content=f"🖼️ Zapowiedź: **PINDOLZ** vs **{opp}** (jutro)",
+                    )
+                except Exception as e:
+                    log("prematch24h", str(e))
+                continue
             # zbiórka DM do składu bez „Gram”
             try:
                 await self._zbiorka_dms(m, stage)
@@ -3168,6 +3273,29 @@ class PindolzBot(commands.Bot):
             return {}
 
 
+
+    async def send_match_image(
+        self,
+        channel: discord.abc.Messageable | None,
+        match: dict,
+        kind: str = "preview",
+        content: str | None = None,
+    ) -> None:
+        """Generuje grafikę Cloudflare Workers AI i wysyła na kanał."""
+        if not channel or not cf_image_enabled():
+            return
+        try:
+            prompt = match_image_prompt(match, kind)
+            data = await asyncio.to_thread(generate_cf_image, prompt, 4)
+            if not data:
+                return
+            fname = "preview.jpg" if kind == "preview" else "result.jpg"
+            f = discord.File(io.BytesIO(data), filename=fname)
+            await channel.send(content=content, file=f)
+            log("cf-image", f"wysłano {kind} mid={match.get('id')}")
+        except Exception as e:
+            log("cf-image", f"send: {e}")
+
     async def handle_sklad_confirm(self, interaction: discord.Interaction, mid: int, ans: str) -> None:
         """Przycisk Gram / Nie mogę z DM składu."""
         uid = interaction.user.id
@@ -3560,11 +3688,14 @@ class PindolzBot(commands.Bot):
         if db.get_config("update_notified") == remote:
             return
         db.set_config("update_notified", remote)
-        await self._dm_owner(
-            f"🆕 **Nowa wersja bota na GitHubie: {remote}** (uruchomiona: {BOT_VERSION}).\n"
-            "Zrestartuj serwer na hostingu, aby pobrać zmiany (jeśli masz włączone Auto Update) "
-            "albo wgraj nowe pliki ręcznie."
+        msg = (
+            f"🆕 **Nowa wersja bota na GitHubie: `{remote}`**\n"
+            f"Aktualnie działa: `{BOT_VERSION}`\n"
+            f"Repo: https://github.com/{GITHUB_REPO}\n\n"
+            "Zrestartuj serwer (Auto Update) albo wgraj nowe pliki ręcznie.\n"
+            "_Wiadomość tylko dla właściciela serwera._"
         )
+        await self._dm_owner(msg)
 
     @update_check.before_loop
     async def before_update_check(self):
@@ -3602,9 +3733,25 @@ class PindolzBot(commands.Bot):
         await self.wait_until_ready()
 
     async def _dm_owner(self, text: str):
+        """DM tylko do właściciela serwera — nigdy na kanał publiczny."""
+        sent: set[int] = set()
+        for g in self.guilds:
+            oid = g.owner_id
+            if not oid or oid in sent:
+                continue
+            try:
+                u = await self.fetch_user_safe(oid)
+                if u:
+                    await u.send(text)
+                    sent.add(int(oid))
+            except Exception as e:
+                print(f"[alert] DM właściciel serwera {oid}: {e}")
+        if sent:
+            return
         try:
             info = await self.application_info()
-            await info.owner.send(text)
+            if info.owner is not None:
+                await info.owner.send(text)
         except Exception as e:
             print(f"[alert] nie udało się wysłać DM: {e}")
 
