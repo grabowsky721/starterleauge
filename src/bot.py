@@ -105,6 +105,7 @@ COMMAND_START_ORDER = [
     "gif-usun",
     "panel",
     "sklad-status",
+    "zbiorka",
     "ping-sklad",
     "moj-status",
     "kapitan",
@@ -1833,6 +1834,10 @@ class PindolzBot(commands.Bot):
                 self.live_check.start()
 
         async def start_prematch():
+            try:
+                await self.resume_pending_lineup_role_clear()
+            except Exception as e:
+                log("sklad-rola", f"resume: {e}")
             if not self.prematch_check.is_running():
                 self.prematch_check.start()
 
@@ -2246,9 +2251,15 @@ class PindolzBot(commands.Bot):
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             await self._start_mvp_vote(channel, m)
             try:
-                await self.clear_active_lineup_roles(getattr(channel, "guild", None), mid=mid)
+                guild = getattr(channel, "guild", None)
+                self.schedule_clear_active_lineup_roles(guild, mid=mid, delay_sec=3600)
             except Exception as e:
-                log("sklad-rola", f"po meczu: {e}")
+                log("sklad-rola", f"po meczu (schedule): {e}")
+            try:
+                db.set_config(f"sklad_closed_{int(mid)}", "1")
+                log("sklad", f"zamknięto potwierdzenia mid={mid}")
+            except Exception:
+                pass
             if row and row.get("msg_live_id"):
                 try:
                     live_ch = await self.get_channel_safe(row.get("msg_live_ch"))
@@ -2284,6 +2295,7 @@ class PindolzBot(commands.Bot):
 
                         except Exception as e:
                             print(f"[schedule] send error: {e}")
+                        # anty-spam: NIE czyścimy preview24h_{mid} — druga grafika 24h się nie wyśle
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid))
@@ -2346,21 +2358,70 @@ class PindolzBot(commands.Bot):
                 stage = 1440  # ~24 h przed meczem
             else:
                 continue
-            key = f"prematch{stage}_{mid}"
-            if db.get_config(key):
-                continue
-            # feature flags: 1440/60→prematch1h, 30/10→prematch
+
+            # flagi / anty-spam
             if stage == 1440:
+                if db.get_config(f"preview24h_{mid}") or db.get_config(f"prematch1440_{mid}"):
+                    continue
                 feat = "prematch1h" if feature_on("prematch1h") else "prematch"
                 if not feature_on(feat) and not feature_on("prematch"):
                     continue
             else:
+                key = f"prematch{stage}_{mid}"
+                if db.get_config(key):
+                    continue
                 feat = "prematch1h" if stage == 60 else "prematch"
                 if not feature_on(feat) and stage != 10:
                     continue
                 if stage == 10 and not feature_on("prematch"):
                     continue
-            db.set_config(key, "1")
+                db.set_config(key, "1")
+
+            # 24h: grafika AI + embed + reakcja ✅ (zainteresowanie, max 1x na mecz)
+            if stage == 1440:
+                try:
+                    opp = self._opponent(m)
+                    when = embeds._match_dt(m)
+                    when_s = when.strftime("%d.%m %H:%M") if when else "nie ustalono terminu"
+                    ok = False
+                    if channel:
+                        desc = (
+                            f"**PINDOLZ** vs **{opp}** · {when_s}\n\n"
+                            "✅ Zareaguj, jeśli jesteś zainteresowany (to nie skład)."
+                        )
+                        emb = embeds._base(
+                            "📅 Mecz za ok. 24 godziny",
+                            getattr(embeds, "C_UPCOMING", 0xF59E0B),
+                            desc,
+                        )
+                        try:
+                            emb.set_footer(text=embeds._match_footer(m, "zainteresowani: 0"))
+                        except Exception:
+                            pass
+                        msg = await channel.send(embed=emb)
+                        ok = True
+                        try:
+                            await msg.add_reaction("✅")
+                        except Exception as e:
+                            log("prematch24h", f"reakcja: {e}")
+                        db.set_config(f"preview24h_msg_{mid}", str(msg.id))
+                        db.set_config(f"preview24h_ch_{mid}", str(getattr(channel, "id", "") or ""))
+                        db.set_config(f"preview24h_by_msg_{msg.id}", str(mid))
+                        db.set_config(f"preview24h_interest_{mid}", "[]")
+                    await self.send_match_image(
+                        channel,
+                        m,
+                        kind="preview",
+                        content=f"🖼️ Zapowiedź: **PINDOLZ** vs **{opp}** (jutro)",
+                    )
+                    db.set_config(f"preview24h_{mid}", "1")
+                    db.set_config(f"prematch1440_{mid}", "1")
+                    log("prematch24h", f"wysłano zapowiedź mid={mid} ok={ok}")
+                except Exception as e:
+                    log("prematch24h", str(e))
+                continue
+
+            # dane do karty prematch (60/30/10)
             form = standing = opp_standing = None
             try:
                 form = await asyncio.to_thread(self.api.get_form, limit=5)
@@ -2377,29 +2438,7 @@ class PindolzBot(commands.Bot):
                         opp_standing = row
             except Exception:
                 pass
-            # 24h: grafika AI + krótki embed (bez zbiórki DM)
-            if stage == 1440:
-                try:
-                    opp = self._opponent(m)
-                    when = embeds._match_dt(m)
-                    when_s = when.strftime("%d.%m %H:%M") if when else "nie ustalono terminu"
-                    if channel:
-                        await channel.send(
-                            embed=embeds._base(
-                                "📅 Mecz za ok. 24 godziny",
-                                getattr(embeds, "C_UPCOMING", 0xF59E0B),
-                                f"**PINDOLZ** vs **{opp}** · {when_s}",
-                            )
-                        )
-                    await self.send_match_image(
-                        channel,
-                        m,
-                        kind="preview",
-                        content=f"🖼️ Zapowiedź: **PINDOLZ** vs **{opp}** (jutro)",
-                    )
-                except Exception as e:
-                    log("prematch24h", str(e))
-                continue
+
             # zbiórka DM do składu bez „Gram”
             try:
                 await self._zbiorka_dms(m, stage)
@@ -2951,6 +2990,113 @@ class PindolzBot(commands.Bot):
         log("sklad-rola", f"mid={mid} +{added} -{removed}")
         return added, removed
 
+
+    def _preview24_interest_ids(self, mid: int) -> list[int]:
+        try:
+            return [int(x) for x in json.loads(db.get_config(f"preview24h_interest_{mid}") or "[]")]
+        except Exception:
+            return []
+
+    def _preview24_set_interest(self, mid: int, ids: list[int]) -> None:
+        uniq = sorted(set(int(x) for x in ids))
+        db.set_config(f"preview24h_interest_{mid}", json.dumps(uniq))
+
+    async def _preview24_update_embed_count(self, mid: int) -> None:
+        msg_id = db.get_config(f"preview24h_msg_{mid}")
+        ch_id = db.get_config(f"preview24h_ch_{mid}")
+        if not msg_id or not ch_id:
+            return
+        try:
+            ch = await self.get_channel_safe(int(ch_id))
+            if not ch:
+                return
+            msg = await ch.fetch_message(int(msg_id))
+            if not msg or not msg.embeds:
+                return
+            emb = msg.embeds[0]
+            n = len(self._preview24_interest_ids(mid))
+            # odśwież footer
+            base = emb.footer.text if emb.footer and emb.footer.text else ""
+            if "zainteresowani:" in base:
+                head = base.split("zainteresowani:")[0].rstrip(" ·")
+                emb.set_footer(text=f"{head} · zainteresowani: {n}" if head else f"zainteresowani: {n}")
+            else:
+                emb.set_footer(text=f"{base} · zainteresowani: {n}" if base else f"zainteresowani: {n}")
+            await msg.edit(embed=emb)
+        except Exception as e:
+            log("prematch24h", f"update count: {e}")
+
+    def schedule_clear_active_lineup_roles(
+        self,
+        guild: discord.Guild | None,
+        mid: int | None = None,
+        delay_sec: int = 3600,
+    ) -> None:
+        """Zdejmij rolę aktywnego składu po delay_sec (domyślnie 1 h od końca meczu)."""
+        if mid is None:
+            mid = db.get_config_int("active_lineup_mid")
+        if mid is None:
+            return
+        clear_at = datetime.now(TZ) + timedelta(seconds=int(delay_sec))
+        db.set_config("active_lineup_clear_mid", str(int(mid)))
+        db.set_config("active_lineup_clear_at", clear_at.isoformat())
+        guild_id = int(guild.id) if guild else None
+
+        # anuluj poprzedni task dla tego mid
+        tasks_map = self.__dict__.setdefault("_lineup_clear_tasks", {})
+        old = tasks_map.get(int(mid))
+        if old and not old.done():
+            old.cancel()
+
+        async def _runner():
+            try:
+                await asyncio.sleep(max(1, int(delay_sec)))
+                g = None
+                if guild_id:
+                    g = self.get_guild(guild_id)
+                if g is None:
+                    for gg in self.guilds:
+                        g = gg
+                        break
+                n = await self.clear_active_lineup_roles(g, mid=int(mid))
+                log("sklad-rola", f"zdjęto rolę po 1h (mid={mid}, n={n})")
+                # wyczyść znacznik tylko jeśli to ten sam mid
+                if db.get_config_int("active_lineup_clear_mid") == int(mid):
+                    db.set_config("active_lineup_clear_at", None)
+                    db.set_config("active_lineup_clear_mid", None)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                log("sklad-rola", f"opóźnione zdejmowanie: {e}")
+
+        tasks_map[int(mid)] = asyncio.create_task(_runner())
+        log("sklad-rola", f"zaplanowano zdjęcie roli za {delay_sec}s (mid={mid})")
+
+    async def resume_pending_lineup_role_clear(self) -> None:
+        """Po restarcie: dokończ zaplanowane zdjęcie roli (od razu lub z pozostałym opóźnieniem)."""
+        mid = db.get_config_int("active_lineup_clear_mid")
+        at_s = db.get_config("active_lineup_clear_at")
+        if not mid or not at_s:
+            return
+        try:
+            at = datetime.fromisoformat(at_s)
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=TZ)
+        except Exception:
+            await self.clear_active_lineup_roles(mid=int(mid))
+            db.set_config("active_lineup_clear_at", None)
+            db.set_config("active_lineup_clear_mid", None)
+            return
+        delay = (at - datetime.now(TZ)).total_seconds()
+        if delay <= 0:
+            n = await self.clear_active_lineup_roles(mid=int(mid))
+            log("sklad-rola", f"po restarcie: zdjęto rolę (mid={mid}, n={n})")
+            db.set_config("active_lineup_clear_at", None)
+            db.set_config("active_lineup_clear_mid", None)
+        else:
+            self.schedule_clear_active_lineup_roles(None, mid=int(mid), delay_sec=int(delay))
+            log("sklad-rola", f"po restarcie: pozostało {int(delay)}s do zdjęcia roli (mid={mid})")
+
     async def clear_active_lineup_roles(self, guild: discord.Guild | None = None, mid: int | None = None) -> int:
         """Zdejmuje rolę aktywnego składu po meczu."""
         role_id = active_lineup_role_id()
@@ -3299,6 +3445,30 @@ class PindolzBot(commands.Bot):
     async def handle_sklad_confirm(self, interaction: discord.Interaction, mid: int, ans: str) -> None:
         """Przycisk Gram / Nie mogę z DM składu."""
         uid = interaction.user.id
+        # po meczu przyciski nie działają
+        if db.get_config(f"sklad_closed_{int(mid)}"):
+            try:
+                await interaction.response.send_message(
+                    "Mecz już się zakończył — potwierdzenia składu są zamknięte.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            try:
+                if interaction.message:
+                    view = discord.ui.View()
+                    for item in (interaction.message.components or []):
+                        pass
+                    # wyłącz przyciski na tej wiadomości DM
+                    disabled = discord.ui.View(timeout=None)
+                    b1 = discord.ui.Button(label="Gram", style=discord.ButtonStyle.success, emoji="✅", disabled=True)
+                    b2 = discord.ui.Button(label="Nie mogę", style=discord.ButtonStyle.danger, emoji="❌", disabled=True)
+                    disabled.add_item(b1)
+                    disabled.add_item(b2)
+                    await interaction.message.edit(view=disabled)
+            except Exception:
+                pass
+            return
         try:
             roster = load_lineup_ids(mid) if "load_lineup_ids" in dir() else self._lineup_ids(mid)
         except Exception:
@@ -3326,10 +3496,10 @@ class PindolzBot(commands.Bot):
                 await interaction.followup.send(msg, ephemeral=True)
             except Exception:
                 pass
-        # opcjonalnie powiadom kapitana o „Nie mogę”
+        # powiadom kapitana o „Nie mogę”
         if ans == "no":
             try:
-                cap = db.get_config_int("captain_id")
+                cap = self.captain_id()
                 if cap:
                     u = await self.fetch_user_safe(int(cap))
                     if u:
@@ -3338,6 +3508,32 @@ class PindolzBot(commands.Bot):
                         )
             except Exception as e:
                 log("sklad", f"confirm DM kapitan: {e}")
+
+        # wszyscy potwierdzili Gram → DM do kapitana (i vice), raz na mecz
+        if ans == "yes" and roster:
+            try:
+                data2 = _lineup_confirms(int(mid))
+                all_yes = all(data2.get(str(x)) == "yes" for x in roster)
+                flag = f"lineup_full_dm_{int(mid)}"
+                if all_yes and not db.get_config(flag):
+                    db.set_config(flag, "1")
+                    names = ", ".join(f"<@{x}>" for x in roster)
+                    text = (
+                        f"✅ **Wszyscy ze składu potwierdzili Gram** (mecz `#{mid}`)."
+                        + f"\n{names}"
+                    )
+                    for cid in (self.captain_id(), self.vice_captain_id()):
+                        if not cid:
+                            continue
+                        try:
+                            u = await self.fetch_user_safe(int(cid))
+                            if u:
+                                await u.send(text)
+                        except Exception:
+                            pass
+                    log("sklad", f"pełny skład Gram mid={mid}")
+            except Exception as e:
+                log("sklad", f"full confirm DM: {e}")
 
     async def handle_poll_vote(self, interaction: discord.Interaction, mid: int, vote: str):
         info = self._poll_info(mid)
@@ -3811,6 +4007,47 @@ class PindolzBot(commands.Bot):
 bot = PindolzBot()
 
 
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if bot.user and payload.user_id == bot.user.id:
+        return
+    emoji = str(payload.emoji)
+    if emoji != "✅" and getattr(payload.emoji, "name", None) != "✅":
+        return
+    mid_s = db.get_config(f"preview24h_by_msg_{payload.message_id}")
+    if not mid_s:
+        return
+    try:
+        mid = int(mid_s)
+        ids = bot._preview24_interest_ids(mid)
+        uid = int(payload.user_id)
+        if uid not in ids:
+            ids.append(uid)
+            bot._preview24_set_interest(mid, ids)
+            await bot._preview24_update_embed_count(mid)
+    except Exception as e:
+        log("prematch24h", f"reaction add: {e}")
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    emoji = str(payload.emoji)
+    if emoji != "✅" and getattr(payload.emoji, "name", None) != "✅":
+        return
+    mid_s = db.get_config(f"preview24h_by_msg_{payload.message_id}")
+    if not mid_s:
+        return
+    try:
+        mid = int(mid_s)
+        uid = int(payload.user_id)
+        ids = [x for x in bot._preview24_interest_ids(mid) if x != uid]
+        bot._preview24_set_interest(mid, ids)
+        await bot._preview24_update_embed_count(mid)
+    except Exception as e:
+        log("prematch24h", f"reaction remove: {e}")
+
+
+
 @bot.tree.command(name="pindolz", description="Najbliższe i ostatnie mecze PINDOLZ")
 async def cmd_pindolz(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -4269,6 +4506,84 @@ async def cmd_sklad_status(interaction: discord.Interaction):
     _, m = nxt
     mid = int(m["id"])
     await interaction.followup.send(embed=_lineup_status_embed(m, mid))
+
+
+
+@bot.tree.command(
+    name="zbiorka",
+    description="Ręczna zbiórka: kto ze składu nie potwierdził Gram (kanał + DM)",
+)
+async def cmd_zbiorka(interaction: discord.Interaction):
+    """Sztab: lista braków na kanale + DM do osób bez Gram."""
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message(
+            "Tylko właściciel, kapitan, vicekapitan lub coach.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+    except Exception as e:
+        await interaction.followup.send(f"Błąd API: {e}", ephemeral=True)
+        return
+    nxt = bot._next_match(upcoming)
+    if not nxt:
+        await interaction.followup.send("Brak nadchodzącego meczu.", ephemeral=True)
+        return
+    _, m = nxt
+    mid = int(m["id"])
+    ids = bot._lineup_ids(mid)
+    if not ids:
+        await interaction.followup.send(
+            "Brak zapisanego składu na ten mecz. Użyj `/sklad`.",
+            ephemeral=True,
+        )
+        return
+    confirms = _lineup_confirms(mid)
+    missing = [uid for uid in ids if confirms.get(str(uid)) != "yes"]
+    try:
+        opp = bot._opponent(m)
+    except Exception:
+        opp = _match_opponent(m)
+    when = embeds._match_dt(m)
+    when_s = when.strftime("%d.%m %H:%M") if when else "nie ustalono terminu"
+    if not missing:
+        await interaction.followup.send(
+            f"✅ Wszyscy ze składu potwierdzili **Gram** (vs **{opp}** · {when_s}).",
+            ephemeral=True,
+        )
+        return
+    mentions = " ".join(f"<@{uid}>" for uid in missing)
+    ch = interaction.channel
+    if interaction.guild and ch and hasattr(ch, "send"):
+        try:
+            body = (
+                f"⏰ **Zbiórka składu** — vs **{opp}** · {when_s}\n"
+                f"Brak potwierdzenia **Gram** ({len(missing)}):\n{mentions}\n"
+                f"_Potwierdź w DM od bota albo daj znać sztabowi._"
+            )
+            await ch.send(body)
+        except Exception as e:
+            log("zbiorka", f"channel send: {e}")
+    dm_text = (
+        f"⏰ **Zbiórka (ręczna)**\n"
+        f"Mecz vs **{opp}** · {when_s}\n"
+        f"Nie potwierdziłeś jeszcze **Gram**. Odpowiedz na DM ze składem albo daj znać kapitanowi."
+    )
+    sent = 0
+    for uid in missing:
+        try:
+            user = await bot.fetch_user_safe(uid)
+            if user:
+                await user.send(dm_text)
+                sent += 1
+        except Exception:
+            pass
+    await interaction.followup.send(
+        f"Zbiórka: **{len(missing)}** bez Gram · DM: {sent}/{len(missing)} · vs **{opp}**",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="ping-sklad", description="DM: ponów prośbę o potwierdzenie do osób bez odpowiedzi")
