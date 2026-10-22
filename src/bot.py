@@ -1,6 +1,4 @@
 import asyncio
-import base64
-import io
 import functools
 import json
 import os
@@ -46,9 +44,6 @@ BOT_VERSION = load_version()
 GITHUB_REPO = "grabowsky721/starterleauge"
 GITHUB_BRANCH = "main"
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-CF_ACCOUNT_ID = (os.getenv("CLOUDFLARE_ACCOUNT_ID") or "").strip()
-CF_API_TOKEN = (os.getenv("CLOUDFLARE_API_TOKEN") or "").strip()
-CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 TZ = ZoneInfo("Europe/Warsaw")
 
 TABLE_UPDATE_TIMES = [
@@ -105,7 +100,6 @@ COMMAND_START_ORDER = [
     "gif-usun",
     "panel",
     "sklad-status",
-    "zbiorka",
     "ping-sklad",
     "moj-status",
     "kapitan",
@@ -190,7 +184,7 @@ FEATURES = {
     "events": ("Wydarzenia", "📆 Wydarzenie serwera Discord dla najbliższego meczu"),
     "gg": ("GG", "👏 Przycisk „GG” pod wynikiem"),
     "updates": ("Aktualizacje", "🆕 Powiadomienie o nowej wersji bota na GitHubie"),
-    "gif": ("GIF", "🎞️ Losowy GIF po wygranej (lista: /gif-dodaj)"),
+    "gif": ("GIF", "🎞️ Losowy GIF po wygranej / przegranej (lista: /gif-dodaj)"),
     "reactions": ("Reakcje", "🎉 Reakcje 🎉/😢 pod wynikiem"),
     "status": ("Status", "🟢 Status bota (odliczanie, seria, LIVE)"),
     "live": ("LIVE", "🔴 Relacja LIVE na kanale LIVE"),
@@ -206,79 +200,9 @@ def feature_on(name: str) -> bool:
     return db.get_config(f"feat_{name}") != "0"
 
 
-
-def cf_image_enabled() -> bool:
-    return bool(CF_ACCOUNT_ID and CF_API_TOKEN)
-
-
-def generate_cf_image(prompt: str, steps: int = 4) -> bytes | None:
-    """Cloudflare Workers AI FLUX – zwraca JPEG bytes albo None."""
-    if not cf_image_enabled():
-        return None
-    url = (
-        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
-        f"/ai/run/{CF_IMAGE_MODEL}"
-    )
-    try:
-        r = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {CF_API_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            json={"prompt": (prompt or "")[:2000], "steps": int(steps)},
-            timeout=90,
-        )
-        if r.status_code >= 400:
-            log("cf-image", f"HTTP {r.status_code}: {r.text[:240]}")
-            return None
-        try:
-            data = r.json()
-        except Exception:
-            log("cf-image", "odpowiedź nie jest JSON")
-            return None
-        if not isinstance(data, dict):
-            return None
-        img_b64 = (data.get("result") or {}).get("image") or data.get("image")
-        if not img_b64:
-            log("cf-image", f"brak image w odpowiedzi: {str(data)[:200]}")
-            return None
-        return base64.b64decode(img_b64)
-    except Exception as e:
-        log("cf-image", str(e))
-        return None
-
-
-def match_image_prompt(match: dict, kind: str = "preview") -> str:
-    """Prompt do grafiki meczowej (esport CS2)."""
-    try:
-        t1 = embeds._team_name(match, "team1")
-        t2 = embeds._team_name(match, "team2")
-    except Exception:
-        t1, t2 = "PINDOLZ", "Opponent"
-    if kind == "result":
-        try:
-            score = embeds._score_str(match)
-        except Exception:
-            s = match.get("score") or {}
-            score = f"{s.get('team1', '?')}:{s.get('team2', '?')}"
-        return (
-            f"Epic esports CS2 match result poster, dark cyber arena, neon orange and blue lights, "
-            f"bold text '{t1} {score} {t2}', championship graphic, high quality, cinematic, no watermark"
-        )
-    return (
-        f"Epic esports CS2 match announcement poster, dark cyber arena, neon lights, "
-        f"bold text '{t1} vs {t2}', coming soon, championship graphic, high quality, cinematic, no watermark"
-    )
-
-
 def log(tag: str, msg: str) -> None:
     """Jednolity log do konsoli GameHost."""
-    try:
-        ts = datetime.now(TZ).strftime("%H:%M:%S")
-    except Exception:
-        ts = "--:--:--"
-    print(f"[{ts}] [{tag}] {msg}")
+    print(f"[{tag}] {msg}")
 
 
 def safe_int(val, default: int | None = None) -> int | None:
@@ -407,6 +331,24 @@ def _win_gifs() -> list[str]:
         return [str(x) for x in json.loads(db.get_config("win_gifs") or "[]")]
     except Exception:
         return []
+
+
+def _loss_gifs() -> list[str]:
+    try:
+        return [str(x) for x in json.loads(db.get_config("loss_gifs") or "[]")]
+    except Exception:
+        return []
+
+
+def _gifs_for(kind: str) -> list[str]:
+    """kind: 'win' | 'loss'"""
+    return _win_gifs() if kind == "win" else _loss_gifs()
+
+
+def _set_gifs(kind: str, gifs: list[str]) -> None:
+    key = "win_gifs" if kind == "win" else "loss_gifs"
+    db.set_config(key, json.dumps(gifs))
+    db.set_config("win_gif_last" if kind == "win" else "loss_gif_last", None)
 
 
 LOOP_NAMES = (
@@ -1035,32 +977,6 @@ def sklad_confirm_view(mid: int) -> discord.ui.View:
     return view
 
 
-
-async def _safe_reply(interaction: discord.Interaction, content: str, *, ephemeral: bool = True) -> None:
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(content, ephemeral=ephemeral)
-        else:
-            await interaction.response.send_message(content, ephemeral=ephemeral)
-    except Exception:
-        try:
-            await interaction.followup.send(content, ephemeral=ephemeral)
-        except Exception:
-            pass
-
-
-async def _disable_sklad_buttons(message: discord.Message | None) -> None:
-    if message is None:
-        return
-    try:
-        view = discord.ui.View(timeout=None)
-        view.add_item(discord.ui.Button(label="Gram", style=discord.ButtonStyle.success, emoji="✅", disabled=True))
-        view.add_item(discord.ui.Button(label="Nie mogę", style=discord.ButtonStyle.danger, emoji="❌", disabled=True))
-        await message.edit(view=view)
-    except Exception:
-        pass
-
-
 def _sklad_preview_embed(m: dict, mid: int, selected_ids: list[int]) -> discord.Embed:
     """Embed panelu składu (interfejs)."""
     opp = _match_opponent(m)
@@ -1560,18 +1476,24 @@ class AnkietaRoleSelect(discord.ui.RoleSelect):
 
 
 class GifListaView(discord.ui.View):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, kind: str = "win"):
         super().__init__(timeout=300)
         self.owner_id = owner_id
-        gifs = _win_gifs()
+        self.kind = kind if kind in ("win", "loss") else "win"
+        gifs = _gifs_for(self.kind)
         options = [discord.SelectOption(label=f"#{i} {g[:80]}"[:100], value=str(i)) for i, g in enumerate(gifs[:25], 1)]
         if options:
             self.add_item(GifRemoveSelect(self, options))
 
     def build_embed(self) -> discord.Embed:
-        gifs = _win_gifs()
-        emb = embeds._base("🎞️ GIF-y po wygranej", embeds.C_INFO)
-        emb.description = ("\n".join(f"**{i}.** {g[:70]}" for i, g in enumerate(gifs, 1))[:4000] if gifs else "Brak GIF-ów. Dodaj `/gif-dodaj`.")
+        gifs = _gifs_for(self.kind)
+        title = "🎞️ GIF-y po wygranej" if self.kind == "win" else "🎞️ GIF-y po przegranej"
+        emb = embeds._base(title, embeds.C_INFO)
+        emb.description = (
+            "\n".join(f"**{i}.** {g[:70]}" for i, g in enumerate(gifs, 1))[:4000]
+            if gifs
+            else "Brak GIF-ów. Dodaj `/gif-dodaj` (wybierz typ)."
+        )
         if gifs:
             emb.set_footer(text="Wybierz pozycję, aby usunąć")
         return emb
@@ -1590,14 +1512,13 @@ class GifRemoveSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         numer = int(self.values[0])
-        gifs = _win_gifs()
+        gifs = _gifs_for(self.panel.kind)
         if numer < 1 or numer > len(gifs):
             await interaction.response.send_message("Zły numer.", ephemeral=True)
             return
         removed = gifs.pop(numer - 1)
-        db.set_config("win_gifs", json.dumps(gifs))
-        db.set_config("win_gif_last", None)
-        new_view = GifListaView(self.panel.owner_id)
+        _set_gifs(self.panel.kind, gifs)
+        new_view = GifListaView(self.panel.owner_id, self.panel.kind)
         await interaction.response.edit_message(embed=new_view.build_embed(), view=new_view if gifs else None)
         await interaction.followup.send(f"Usunięto #{numer}: `{removed[:80]}`", ephemeral=True)
 
@@ -1695,17 +1616,12 @@ async def _build_captain_panel_embed() -> discord.Embed:
 
 
 def _match_opponent(m: dict) -> str:
-    """Nazwa przeciwnika PINDOLZ (po id, fallback po nazwie)."""
     try:
         t1, t2 = m.get("team1") or {}, m.get("team2") or {}
-        if t1.get("id") == PINDOLZ_TEAM_ID:
-            return (t2.get("name") or "???").strip() or "???"
-        if t2.get("id") == PINDOLZ_TEAM_ID:
-            return (t1.get("name") or "???").strip() or "???"
-        n1, n2 = (t1.get("name") or "?").strip(), (t2.get("name") or "?").strip()
+        n1, n2 = t1.get("name") or "?", t2.get("name") or "?"
         return n2 if "pindolz" in n1.lower() else n1
     except Exception:
-        return "???"
+        return "?"
 
 
 def _lineup_status_lists(mid: int) -> tuple[list[int], list[str], list[str], list[str]]:
@@ -1772,7 +1688,7 @@ class PindolzBot(commands.Bot):
         try:
             self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, TreningStaffButton, TreningRateButton, TreningRateStaffButton, MvpButton)
         except Exception as e:
-            log("start", f"dynamic items: {e}")
+            print(f"[start] dynamic items: {e}")
         asyncio.create_task(self._soft_start_tasks())
         asyncio.create_task(self._reschedule_training_polls())
 
@@ -1875,10 +1791,6 @@ class PindolzBot(commands.Bot):
                 self.live_check.start()
 
         async def start_prematch():
-            try:
-                await self.resume_pending_lineup_role_clear()
-            except Exception as e:
-                log("sklad-rola", f"resume: {e}")
             if not self.prematch_check.is_running():
                 self.prematch_check.start()
 
@@ -2111,7 +2023,11 @@ class PindolzBot(commands.Bot):
 
     @staticmethod
     def _opponent(match: dict) -> str:
-        return _match_opponent(match)
+        t1 = match.get("team1") or {}
+        t2 = match.get("team2") or {}
+        if t1.get("id") == PINDOLZ_TEAM_ID:
+            return t2.get("name") or "???"
+        return t1.get("name") or "???"
 
     async def _edit_or_send(self, channel, embed, msg_id, ch_id, view=None):
         """Edytuj istniejącą wiadomość albo wyślij nową. Zwraca (msg_id, ch_id) lub (None, None)."""
@@ -2190,7 +2106,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            table = await self.api_call(self.api.get_division6_table)
+            table = await asyncio.to_thread(self.api.get_division6_table)
         except Exception as e:
             print(f"[table] API error: {e}")
             return
@@ -2235,16 +2151,16 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            history = await self.api_call(self.api.get_pindolz_history)
-            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
+            history = await asyncio.to_thread(self.api.get_pindolz_history)
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
         except Exception as e:
             log("daily", f"API error: {e}")
             return
         now = datetime.now(TZ)
-        form = await self.api_call(self.api.get_form, history, limit=5)
+        form = await asyncio.to_thread(self.api.get_form, history, limit=5)
         standing = None
         try:
-            standing = (await self.api_call(self.api.get_pindolz_standing))
+            standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
         except Exception:
             pass
         cutoff = now - timedelta(days=14)
@@ -2274,33 +2190,12 @@ class PindolzBot(commands.Bot):
             msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None, view=gg_view(mid))
             await self._react_result(ch_id, msg_id, m)
             await self._post_win_gif(ch_id, m)
-            # grafika wyniku na kanał LIVE (Cloudflare Workers AI)
-            try:
-                live_ch = await self.get_channel_safe(self._live_channel_id())
-                await self.send_match_image(
-                    live_ch or channel,
-                    m,
-                    kind="result",
-                    content="🏁 **Wynik meczu**",
-                )
-            except Exception as e:
-                log("cf-image", f"result: {e}")
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             await self._start_mvp_vote(channel, m)
             try:
-                guild = getattr(channel, "guild", None)
-                self.schedule_clear_active_lineup_roles(guild, mid=mid, delay_sec=3600)
+                await self.clear_active_lineup_roles(getattr(channel, "guild", None), mid=mid)
             except Exception as e:
-                log("sklad-rola", f"po meczu (schedule): {e}")
-            try:
-                db.set_config(f"sklad_closed_{int(mid)}", "1")
-                log("sklad", f"zamknięto potwierdzenia mid={mid}")
-            except Exception:
-                pass
-            try:
-                self.api.invalidate_cache()
-            except Exception:
-                pass
+                log("sklad-rola", f"po meczu: {e}")
             if row and row.get("msg_live_id"):
                 try:
                     live_ch = await self.get_channel_safe(row.get("msg_live_ch"))
@@ -2335,13 +2230,7 @@ class PindolzBot(commands.Bot):
                         )
 
                         except Exception as e:
-                            log("schedule", f"send error: {e}")
-                        # anty-spam: NIE czyścimy preview24h_{mid} — druga grafika 24h się nie wyśle
-                        try:
-                            self._upcoming_cache = None
-                            self.api.invalidate_cache("upcoming")
-                        except Exception:
-                            pass
+                            print(f"[schedule] send error: {e}")
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid))
@@ -2350,26 +2239,30 @@ class PindolzBot(commands.Bot):
     PREMATCH_MINUTES = 30
 
     async def _upcoming_cached(self) -> list:
-        """Upcoming mecze – cache 10 min; przy awarii API zwraca ostatni dobry cache."""
+        """Upcoming mecze – cache 10 min, API w wątku (nie blokuje event loop)."""
         now = datetime.now(TZ)
         if self._upcoming_cache and (now - self._upcoming_cache[0]) < timedelta(minutes=10):
             return self._upcoming_cache[1]
-        data = await self.api_call(self.api.get_pindolz_upcoming, err_tag="upcoming")
-        if data is None:
+        try:
+            data = await asyncio.to_thread(self.api.get_pindolz_upcoming)
+        except Exception as e:
+            log("api", f"upcoming: {e}")
             return list(self._upcoming_cache[1]) if self._upcoming_cache else []
-        self._upcoming_cache = (now, list(data))
+        self._upcoming_cache = (now, data or [])
         return self._upcoming_cache[1]
 
     async def _table_cached(self) -> list:
-        """Tabela dywizji – cache 5 min; przy awarii ostatni dobry wynik."""
+        """Tabela dywizji – cache 5 min."""
         now = datetime.now(TZ)
         cache = getattr(self, "_table_cache", None)
         if cache and (now - cache[0]) < timedelta(minutes=5):
             return cache[1]
-        data = await self.api_call(self.api.get_division6_table, err_tag="table")
-        if data is None:
+        try:
+            data = await asyncio.to_thread(self.api.get_division6_table)
+        except Exception as e:
+            log("api", f"table: {e}")
             return list(cache[1]) if cache else []
-        self._table_cache = (now, list(data))
+        self._table_cache = (now, data or [])
         return self._table_cache[1]
 
     @tasks.loop(minutes=1)
@@ -2396,77 +2289,22 @@ class PindolzBot(commands.Bot):
                 stage = 30
             elif timedelta(minutes=30) < delta <= timedelta(minutes=60):
                 stage = 60
-            elif timedelta(hours=23) < delta <= timedelta(hours=25):
-                stage = 1440  # ~24 h przed meczem
             else:
                 continue
-
-            # flagi / anty-spam
-            if stage == 1440:
-                if db.get_config(f"preview24h_{mid}") or db.get_config(f"prematch1440_{mid}"):
-                    continue
-                feat = "prematch1h" if feature_on("prematch1h") else "prematch"
-                if not feature_on(feat) and not feature_on("prematch"):
-                    continue
-            else:
-                key = f"prematch{stage}_{mid}"
-                if db.get_config(key):
-                    continue
-                feat = "prematch1h" if stage == 60 else "prematch"
-                if not feature_on(feat) and stage != 10:
-                    continue
-                if stage == 10 and not feature_on("prematch"):
-                    continue
-                db.set_config(key, "1")
-
-            # 24h: grafika AI + embed + reakcja ✅ (zainteresowanie, max 1x na mecz)
-            if stage == 1440:
-                try:
-                    opp = self._opponent(m)
-                    when = embeds._match_dt(m)
-                    when_s = when.strftime("%d.%m %H:%M") if when else "nie ustalono terminu"
-                    ok = False
-                    if channel:
-                        desc = (
-                            f"**PINDOLZ** vs **{opp}** · {when_s}\n\n"
-                            "✅ Zareaguj, jeśli jesteś zainteresowany (to nie skład)."
-                        )
-                        emb = embeds._base(
-                            "📅 Mecz za ok. 24 godziny",
-                            getattr(embeds, "C_UPCOMING", 0xF59E0B),
-                            desc,
-                        )
-                        try:
-                            emb.set_footer(text=embeds._match_footer(m, "zainteresowani: 0"))
-                        except Exception:
-                            pass
-                        msg = await channel.send(embed=emb)
-                        ok = True
-                        try:
-                            await msg.add_reaction("✅")
-                        except Exception as e:
-                            log("prematch24h", f"reakcja: {e}")
-                        db.set_config(f"preview24h_msg_{mid}", str(msg.id))
-                        db.set_config(f"preview24h_ch_{mid}", str(getattr(channel, "id", "") or ""))
-                        db.set_config(f"preview24h_by_msg_{msg.id}", str(mid))
-                        db.set_config(f"preview24h_interest_{mid}", "[]")
-                    await self.send_match_image(
-                        channel,
-                        m,
-                        kind="preview",
-                        content=f"🖼️ Zapowiedź: **PINDOLZ** vs **{opp}** (jutro)",
-                    )
-                    db.set_config(f"preview24h_{mid}", "1")
-                    db.set_config(f"prematch1440_{mid}", "1")
-                    log("prematch24h", f"wysłano zapowiedź mid={mid} ok={ok}")
-                except Exception as e:
-                    log("prematch24h", str(e))
+            key = f"prematch{stage}_{mid}"
+            if db.get_config(key):
                 continue
-
-            # dane do karty prematch (60/30/10)
+            # feature flags: 60→prematch1h, 30/10→prematch
+            feat = "prematch1h" if stage == 60 else "prematch"
+            if not feature_on(feat) and stage != 10:
+                # 10 min zawsze przy włączonym prematch
+                continue
+            if stage == 10 and not feature_on("prematch"):
+                continue
+            db.set_config(key, "1")
             form = standing = opp_standing = None
             try:
-                form = await self.api_call(self.api.get_form, limit=5)
+                form = await asyncio.to_thread(self.api.get_form, limit=5)
             except Exception:
                 pass
             try:
@@ -2480,7 +2318,6 @@ class PindolzBot(commands.Bot):
                         opp_standing = row
             except Exception:
                 pass
-
             # zbiórka DM do składu bez „Gram”
             try:
                 await self._zbiorka_dms(m, stage)
@@ -2534,15 +2371,16 @@ class PindolzBot(commands.Bot):
         if not channel:
             self.live_check.change_interval(seconds=LIVE_INTERVAL_IDLE)
             return
-        lives = await self.api_call(self.api.get_pindolz_live, err_tag="live")
-        if lives is None:
+        try:
+            lives = await asyncio.to_thread(self.api.get_pindolz_live)
+            self._live_errors = 0
+        except Exception as e:
             self._live_errors = getattr(self, "_live_errors", 0) + 1
-            log("live", f"API error / brak danych ({self._live_errors})")
+            log("live", f"API error ({self._live_errors}): {e}")
             backoff = min(30, LIVE_INTERVAL_IDLE * (1 + self._live_errors // 2))
             if self.live_check.seconds != backoff:
                 self.live_check.change_interval(seconds=backoff)
             return
-        self._live_errors = 0
         target = LIVE_INTERVAL_ACTIVE if lives else LIVE_INTERVAL_IDLE
         if self.live_check.seconds != target:
             self.live_check.change_interval(seconds=target)
@@ -2581,7 +2419,7 @@ class PindolzBot(commands.Bot):
             match_data = None
             history = []
             try:
-                history = await self.api_call(self.api.get_pindolz_history)
+                history = await asyncio.to_thread(self.api.get_pindolz_history)
                 for h in history:
                     if h.get("id") == mid:
                         match_data = h
@@ -2589,10 +2427,10 @@ class PindolzBot(commands.Bot):
             except Exception:
                 pass
             if match_data:
-                form = await self.api_call(self.api.get_form, history, limit=5) if history else None
+                form = await asyncio.to_thread(self.api.get_form, history, limit=5) if history else None
                 standing = None
                 try:
-                    standing = (await self.api_call(self.api.get_pindolz_standing))
+                    standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
                 except Exception:
                     pass
                 score = match_data.get("score") or {}
@@ -2882,7 +2720,7 @@ class PindolzBot(commands.Bot):
         # konflikt z meczem ligowym?
         conflict_note = ""
         try:
-            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
             for mm in upcoming or []:
                 mdt = embeds._match_dt(mm)
                 if not mdt:
@@ -3031,119 +2869,6 @@ class PindolzBot(commands.Bot):
         log("sklad-rola", f"mid={mid} +{added} -{removed}")
         return added, removed
 
-
-    def _preview24_interest_ids(self, mid: int) -> list[int]:
-        try:
-            return [int(x) for x in json.loads(db.get_config(f"preview24h_interest_{mid}") or "[]")]
-        except Exception:
-            return []
-
-    def _preview24_set_interest(self, mid: int, ids: list[int]) -> None:
-        uniq = sorted(set(int(x) for x in ids))
-        db.set_config(f"preview24h_interest_{mid}", json.dumps(uniq))
-
-    async def _preview24_update_embed_count(self, mid: int) -> None:
-        msg_id = db.get_config(f"preview24h_msg_{mid}")
-        ch_id = db.get_config(f"preview24h_ch_{mid}")
-        if not msg_id or not ch_id:
-            return
-        # throttle: max 1 edycja / 3 s na mecz
-        now_ts = datetime.now(TZ).timestamp()
-        last_map = self.__dict__.setdefault("_preview24_edit_ts", {})
-        if now_ts - last_map.get(int(mid), 0) < 3:
-            return
-        last_map[int(mid)] = now_ts
-        try:
-            ch = await self.get_channel_safe(int(ch_id))
-            if not ch:
-                return
-            msg = await ch.fetch_message(int(msg_id))
-            if not msg or not msg.embeds:
-                return
-            emb = msg.embeds[0]
-            n = len(self._preview24_interest_ids(mid))
-            # odśwież footer
-            base = emb.footer.text if emb.footer and emb.footer.text else ""
-            if "zainteresowani:" in base:
-                head = base.split("zainteresowani:")[0].rstrip(" ·")
-                emb.set_footer(text=f"{head} · zainteresowani: {n}" if head else f"zainteresowani: {n}")
-            else:
-                emb.set_footer(text=f"{base} · zainteresowani: {n}" if base else f"zainteresowani: {n}")
-            await msg.edit(embed=emb)
-        except Exception as e:
-            log("prematch24h", f"update count: {e}")
-
-    def schedule_clear_active_lineup_roles(
-        self,
-        guild: discord.Guild | None,
-        mid: int | None = None,
-        delay_sec: int = 3600,
-    ) -> None:
-        """Zdejmij rolę aktywnego składu po delay_sec (domyślnie 1 h od końca meczu)."""
-        if mid is None:
-            mid = db.get_config_int("active_lineup_mid")
-        if mid is None:
-            return
-        clear_at = datetime.now(TZ) + timedelta(seconds=int(delay_sec))
-        db.set_config("active_lineup_clear_mid", str(int(mid)))
-        db.set_config("active_lineup_clear_at", clear_at.isoformat())
-        guild_id = int(guild.id) if guild else None
-
-        # anuluj poprzedni task dla tego mid
-        tasks_map = self.__dict__.setdefault("_lineup_clear_tasks", {})
-        old = tasks_map.get(int(mid))
-        if old and not old.done():
-            old.cancel()
-
-        async def _runner():
-            try:
-                await asyncio.sleep(max(1, int(delay_sec)))
-                g = None
-                if guild_id:
-                    g = self.get_guild(guild_id)
-                if g is None:
-                    for gg in self.guilds:
-                        g = gg
-                        break
-                n = await self.clear_active_lineup_roles(g, mid=int(mid))
-                log("sklad-rola", f"zdjęto rolę po 1h (mid={mid}, n={n})")
-                # wyczyść znacznik tylko jeśli to ten sam mid
-                if db.get_config_int("active_lineup_clear_mid") == int(mid):
-                    db.set_config("active_lineup_clear_at", None)
-                    db.set_config("active_lineup_clear_mid", None)
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                log("sklad-rola", f"opóźnione zdejmowanie: {e}")
-
-        tasks_map[int(mid)] = asyncio.create_task(_runner())
-        log("sklad-rola", f"zaplanowano zdjęcie roli za {delay_sec}s (mid={mid})")
-
-    async def resume_pending_lineup_role_clear(self) -> None:
-        """Po restarcie: dokończ zaplanowane zdjęcie roli (od razu lub z pozostałym opóźnieniem)."""
-        mid = db.get_config_int("active_lineup_clear_mid")
-        at_s = db.get_config("active_lineup_clear_at")
-        if not mid or not at_s:
-            return
-        try:
-            at = datetime.fromisoformat(at_s)
-            if at.tzinfo is None:
-                at = at.replace(tzinfo=TZ)
-        except Exception:
-            await self.clear_active_lineup_roles(mid=int(mid))
-            db.set_config("active_lineup_clear_at", None)
-            db.set_config("active_lineup_clear_mid", None)
-            return
-        delay = (at - datetime.now(TZ)).total_seconds()
-        if delay <= 0:
-            n = await self.clear_active_lineup_roles(mid=int(mid))
-            log("sklad-rola", f"po restarcie: zdjęto rolę (mid={mid}, n={n})")
-            db.set_config("active_lineup_clear_at", None)
-            db.set_config("active_lineup_clear_mid", None)
-        else:
-            self.schedule_clear_active_lineup_roles(None, mid=int(mid), delay_sec=int(delay))
-            log("sklad-rola", f"po restarcie: pozostało {int(delay)}s do zdjęcia roli (mid={mid})")
-
     async def clear_active_lineup_roles(self, guild: discord.Guild | None = None, mid: int | None = None) -> int:
         """Zdejmuje rolę aktywnego składu po meczu."""
         role_id = active_lineup_role_id()
@@ -3191,7 +2916,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            history = (await self.api_call(self.api.get_pindolz_history))
+            history = (await asyncio.to_thread(self.api.get_pindolz_history))
         except Exception as e:
             log("weekly", f"API error: {e}")
             return
@@ -3216,7 +2941,7 @@ class PindolzBot(commands.Bot):
                 losses += 1
         standing = None
         try:
-            standing = (await self.api_call(self.api.get_pindolz_standing))
+            standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
         except Exception:
             pass
         await channel.send(embed=embeds.weekly_summary_embed(week_matches, wins, losses, standing))
@@ -3278,7 +3003,7 @@ class PindolzBot(commands.Bot):
 
         # 3. LIVE – ma pierwszeństwo
         try:
-            lives = await self.api_call(self.api.get_pindolz_live)
+            lives = await asyncio.to_thread(self.api.get_pindolz_live)
         except Exception:
             lives = []
         if lives:
@@ -3296,7 +3021,7 @@ class PindolzBot(commands.Bot):
 
         # 1 + 2. Odliczanie i „dziś gramy"
         try:
-            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
         except Exception:
             upcoming = []
         nxt = None
@@ -3313,7 +3038,7 @@ class PindolzBot(commands.Bot):
 
         # 8. Seria wygranych / porażek
         try:
-            history = await self.api_call(self.api.get_pindolz_history)
+            history = await asyncio.to_thread(self.api.get_pindolz_history)
         except Exception:
             history = []
         streak = 0
@@ -3338,7 +3063,7 @@ class PindolzBot(commands.Bot):
 
         # Winrate i strata do lidera (z tabeli)
         try:
-            table = await self.api_call(self.api.get_division6_table)
+            table = await asyncio.to_thread(self.api.get_division6_table)
         except Exception:
             table = []
         us = next((r for r in table if ((r.get("team") or {}).get("name") or "").upper() == "PINDOLZ"), None)
@@ -3465,92 +3190,6 @@ class PindolzBot(commands.Bot):
         except Exception:
             return {}
 
-
-
-    async def send_match_image(
-        self,
-        channel: discord.abc.Messageable | None,
-        match: dict,
-        kind: str = "preview",
-        content: str | None = None,
-    ) -> None:
-        """Generuje grafikę Cloudflare Workers AI i wysyła na kanał."""
-        if not channel or not cf_image_enabled():
-            return
-        try:
-            prompt = match_image_prompt(match, kind)
-            data = await asyncio.to_thread(generate_cf_image, prompt, 4)
-            if not data:
-                return
-            fname = "preview.jpg" if kind == "preview" else "result.jpg"
-            f = discord.File(io.BytesIO(data), filename=fname)
-            await channel.send(content=content, file=f)
-            log("cf-image", f"wysłano {kind} mid={match.get('id')}")
-        except Exception as e:
-            log("cf-image", f"send: {e}")
-
-    async def handle_sklad_confirm(self, interaction: discord.Interaction, mid: int, ans: str) -> None:
-        """Przycisk Gram / Nie mogę z DM składu."""
-        uid = interaction.user.id
-        # po meczu przyciski nie działają
-        if db.get_config(f"sklad_closed_{int(mid)}"):
-            await _safe_reply(
-                interaction,
-                "Mecz już się zakończył — potwierdzenia składu są zamknięte.",
-            )
-            await _disable_sklad_buttons(interaction.message)
-            return
-        roster = self._lineup_ids(mid)
-        if roster and uid not in roster:
-            await _safe_reply(interaction, "Nie jesteś na liście składu tego meczu.")
-            return
-        data = _lineup_confirms(int(mid))
-        data[str(uid)] = "yes" if ans == "yes" else "no"
-        _set_lineup_confirms(int(mid), data)
-        if ans == "yes":
-            msg = "✅ Zaznaczono **Gram** – dzięki!"
-        else:
-            msg = "❌ Zaznaczono **Nie mogę**. Kapitan dostanie info przy zbiórce."
-        await _safe_reply(interaction, msg)
-        # powiadom kapitana o „Nie mogę”
-        if ans == "no":
-            try:
-                cap = self.captain_id()
-                if cap:
-                    u = await self.fetch_user_safe(int(cap))
-                    if u:
-                        await u.send(
-                            f"❌ <@{uid}> **nie może** grać (mecz `#{mid}`)."
-                        )
-            except Exception as e:
-                log("sklad", f"confirm DM kapitan: {e}")
-
-        # wszyscy potwierdzili Gram → DM do kapitana (i vice), raz na mecz
-        if ans == "yes" and roster:
-            try:
-                data2 = _lineup_confirms(int(mid))
-                all_yes = all(data2.get(str(x)) == "yes" for x in roster)
-                flag = f"lineup_full_dm_{int(mid)}"
-                if all_yes and not db.get_config(flag):
-                    db.set_config(flag, "1")
-                    names = ", ".join(f"<@{x}>" for x in roster)
-                    text = (
-                        f"✅ **Wszyscy ze składu potwierdzili Gram** (mecz `#{mid}`)."
-                        + f"\n{names}"
-                    )
-                    for cid in (self.captain_id(), self.vice_captain_id()):
-                        if not cid:
-                            continue
-                        try:
-                            u = await self.fetch_user_safe(int(cid))
-                            if u:
-                                await u.send(text)
-                        except Exception:
-                            pass
-                    log("sklad", f"pełny skład Gram mid={mid}")
-            except Exception as e:
-                log("sklad", f"full confirm DM: {e}")
-
     async def handle_poll_vote(self, interaction: discord.Interaction, mid: int, vote: str):
         info = self._poll_info(mid)
         ts = info.get("ts")
@@ -3575,7 +3214,7 @@ class PindolzBot(commands.Bot):
         if not channel:
             return
         try:
-            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
         except Exception as e:
             log("poll", f"API error: {e}")
             return
@@ -3665,7 +3304,7 @@ class PindolzBot(commands.Bot):
             if archive:
                 await thread.edit(archived=True)
         except Exception as e:
-            log("thread", f"update error: {e}")
+            print(f"[thread] update error: {e}")
 
     # ---------- WYDARZENIE SERWERA DISCORD ----------
     @tasks.loop(minutes=5)
@@ -3678,7 +3317,7 @@ class PindolzBot(commands.Bot):
         if not guild:
             return
         try:
-            upcoming = await self.api_call(self.api.get_pindolz_upcoming)
+            upcoming = await asyncio.to_thread(self.api.get_pindolz_upcoming)
         except Exception as e:
             log("event", f"API error: {e}")
             return
@@ -3748,31 +3387,43 @@ class PindolzBot(commands.Bot):
         except Exception as e:
             log("event", f"finish error: {e}")
 
-    # ---------- GIF PO WYGRANEJ ----------
-    async def _post_win_gif(self, ch_id, match: dict):
+    # ---------- GIF PO WYNIKU (wygrana / przegrana) ----------
+    async def _post_result_gif(self, ch_id, match: dict):
+        """Losowy GIF po wygranej lub przegranej (osobne listy)."""
         if not feature_on("gif") or not ch_id:
             return
-        if self.api.did_pindolz_win(match) is not True or embeds._is_walkover(match):
+        if embeds._is_walkover(match):
+            return
+        won = self.api.did_pindolz_win(match)
+        if won is True:
+            kind, last_key = "win", "win_gif_last"
+        elif won is False:
+            kind, last_key = "loss", "loss_gif_last"
+        else:
             return
         dt = embeds._match_dt(match)
         if dt and dt < datetime.now(TZ) - timedelta(hours=36):
             return  # nie spamujemy GIF-ami przy nadrabianiu starszych wyników
-        gifs = _win_gifs()
+        gifs = _gifs_for(kind)
         if not gifs:
             return
         try:
-            last = int(db.get_config("win_gif_last") or -1)
+            last = int(db.get_config(last_key) or -1)
         except ValueError:
             last = -1
         choices = [i for i in range(len(gifs)) if i != last] or [0]
         idx = random.choice(choices)
-        db.set_config("win_gif_last", str(idx))
+        db.set_config(last_key, str(idx))
         try:
             ch = await self.get_channel_safe(ch_id)
             if ch:
                 await ch.send(gifs[idx])
         except Exception as e:
             print(f"[gif] send error: {e}")
+
+    async def _post_win_gif(self, ch_id, match: dict):
+        """Alias wsteczny – wywołuje uniwersalny post (win lub loss)."""
+        await self._post_result_gif(ch_id, match)
 
     # ---------- SKŁAD NA MECZ ----------
     def _lineup_ids(self, mid) -> list[int]:
@@ -3892,7 +3543,7 @@ class PindolzBot(commands.Bot):
         try:
             remote = await asyncio.to_thread(self._fetch_remote_version)
         except Exception as e:
-            log("update", f"błąd sprawdzania wersji: {e}")
+            print(f"[update] błąd sprawdzania wersji: {e}")
             return
         rt = self._ver_tuple(remote or "")
         if not rt or rt <= self._ver_tuple(BOT_VERSION):
@@ -3900,14 +3551,11 @@ class PindolzBot(commands.Bot):
         if db.get_config("update_notified") == remote:
             return
         db.set_config("update_notified", remote)
-        msg = (
-            f"🆕 **Nowa wersja bota na GitHubie: `{remote}`**\n"
-            f"Aktualnie działa: `{BOT_VERSION}`\n"
-            f"Repo: https://github.com/{GITHUB_REPO}\n\n"
-            "Zrestartuj serwer (Auto Update) albo wgraj nowe pliki ręcznie.\n"
-            "_Wiadomość tylko dla właściciela serwera._"
+        await self._dm_owner(
+            f"🆕 **Nowa wersja bota na GitHubie: {remote}** (uruchomiona: {BOT_VERSION}).\n"
+            "Zrestartuj serwer na hostingu, aby pobrać zmiany (jeśli masz włączone Auto Update) "
+            "albo wgraj nowe pliki ręcznie."
         )
-        await self._dm_owner(msg)
 
     @update_check.before_loop
     async def before_update_check(self):
@@ -3945,27 +3593,11 @@ class PindolzBot(commands.Bot):
         await self.wait_until_ready()
 
     async def _dm_owner(self, text: str):
-        """DM tylko do właściciela serwera — nigdy na kanał publiczny."""
-        sent: set[int] = set()
-        for g in self.guilds:
-            oid = g.owner_id
-            if not oid or oid in sent:
-                continue
-            try:
-                u = await self.fetch_user_safe(oid)
-                if u:
-                    await u.send(text)
-                    sent.add(int(oid))
-            except Exception as e:
-                log("alert", f"DM właściciel serwera {oid}: {e}")
-        if sent:
-            return
         try:
             info = await self.application_info()
-            if info.owner is not None:
-                await info.owner.send(text)
+            await info.owner.send(text)
         except Exception as e:
-            log("alert", f"nie udało się wysłać DM: {e}")
+            print(f"[alert] nie udało się wysłać DM: {e}")
 
     @staticmethod
     def _api_error_text(err: Exception | None) -> str:
@@ -3985,7 +3617,7 @@ class PindolzBot(commands.Bot):
         if not feature_on("alerts"):
             return
         try:
-            await self.api_call(self.api.get_pindolz_live)
+            await asyncio.to_thread(self.api.get_pindolz_live)
         except Exception as e:
             self._api_fail += 1
             print(f"[api_watch] błąd ({self._api_fail}): {e}")
@@ -4021,47 +3653,6 @@ class PindolzBot(commands.Bot):
 
 
 bot = PindolzBot()
-
-
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if bot.user and payload.user_id == bot.user.id:
-        return
-    emoji = str(payload.emoji)
-    if emoji != "✅" and getattr(payload.emoji, "name", None) != "✅":
-        return
-    mid_s = db.get_config(f"preview24h_by_msg_{payload.message_id}")
-    if not mid_s:
-        return
-    try:
-        mid = int(mid_s)
-        ids = bot._preview24_interest_ids(mid)
-        uid = int(payload.user_id)
-        if uid not in ids:
-            ids.append(uid)
-            bot._preview24_set_interest(mid, ids)
-            await bot._preview24_update_embed_count(mid)
-    except Exception as e:
-        log("prematch24h", f"reaction add: {e}")
-
-
-@bot.event
-async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
-    emoji = str(payload.emoji)
-    if emoji != "✅" and getattr(payload.emoji, "name", None) != "✅":
-        return
-    mid_s = db.get_config(f"preview24h_by_msg_{payload.message_id}")
-    if not mid_s:
-        return
-    try:
-        mid = int(mid_s)
-        uid = int(payload.user_id)
-        ids = [x for x in bot._preview24_interest_ids(mid) if x != uid]
-        bot._preview24_set_interest(mid, ids)
-        await bot._preview24_update_embed_count(mid)
-    except Exception as e:
-        log("prematch24h", f"reaction remove: {e}")
-
 
 
 @bot.tree.command(name="pindolz", description="Najbliższe i ostatnie mecze PINDOLZ")
@@ -4445,17 +4036,30 @@ async def cmd_gracze(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embeds.players_embed(_player_nicks()))
 
 
-@bot.tree.command(name="gif-dodaj", description="Dodaj GIF lub obrazek do losowania po wygranej (właściciel)")
-@app_commands.describe(link="Link https:// do GIF-a lub obrazka (np. Tenor, Giphy, Imgur)")
-async def cmd_gif_dodaj(interaction: discord.Interaction, link: str):
+@bot.tree.command(name="gif-dodaj", description="Dodaj GIF/obrazek do listy po wygranej lub przegranej (właściciel)")
+@app_commands.describe(
+    link="Link https:// do GIF-a lub obrazka (np. Tenor, Giphy, Imgur)",
+    typ="Po wygranej czy po przegranej",
+)
+@app_commands.choices(typ=[
+    app_commands.Choice(name="wygrana", value="win"),
+    app_commands.Choice(name="przegrana", value="loss"),
+])
+async def cmd_gif_dodaj(
+    interaction: discord.Interaction,
+    link: str,
+    typ: app_commands.Choice[str] = None,
+):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
+    kind = (typ.value if typ else "win")
+    label = "wygranej" if kind == "win" else "przegranej"
     link = link.strip()
     if not link.startswith("https://") or len(link) > 300 or any(c.isspace() for c in link):
         await interaction.response.send_message("Podaj poprawny link zaczynający się od `https://` (bez spacji, do 300 znaków).", ephemeral=True)
         return
-    gifs = _win_gifs()
+    gifs = _gifs_for(kind)
     if link in gifs:
         await interaction.response.send_message("Ten link jest już na liście.", ephemeral=True)
         return
@@ -4463,34 +4067,61 @@ async def cmd_gif_dodaj(interaction: discord.Interaction, link: str):
         await interaction.response.send_message("Lista jest pełna (max 50). Usuń coś przez `/gif-usun`.", ephemeral=True)
         return
     gifs.append(link)
-    db.set_config("win_gifs", json.dumps(gifs))
-    await interaction.response.send_message(f"🎞️ Dodano jako #{len(gifs)} (na liście: {len(gifs)}). Podgląd:\n{link}", ephemeral=True)
+    _set_gifs(kind, gifs)
+    await interaction.response.send_message(
+        f"🎞️ Dodano do listy po **{label}** jako #{len(gifs)} (na liście: {len(gifs)}). Podgląd:\n{link}",
+        ephemeral=True,
+    )
 
 
-@bot.tree.command(name="gif-lista", description="Lista GIF-ów z usuwaniem (interfejs; właściciel)")
-async def cmd_gif_lista(interaction: discord.Interaction):
+@bot.tree.command(name="gif-lista", description="Lista GIF-ów (wygrana / przegrana) z usuwaniem (właściciel)")
+@app_commands.describe(typ="Którą listę pokazać")
+@app_commands.choices(typ=[
+    app_commands.Choice(name="wygrana", value="win"),
+    app_commands.Choice(name="przegrana", value="loss"),
+])
+async def cmd_gif_lista(
+    interaction: discord.Interaction,
+    typ: app_commands.Choice[str] = None,
+):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
-    view = GifListaView(interaction.user.id)
-    gifs = _win_gifs()
+    kind = (typ.value if typ else "win")
+    view = GifListaView(interaction.user.id, kind)
+    gifs = _gifs_for(kind)
     await interaction.response.send_message(embed=view.build_embed(), view=view if gifs else None, ephemeral=True)
 
 
 @bot.tree.command(name="gif-usun", description="Usuń GIF z listy po numerze (właściciel)")
-@app_commands.describe(numer="Numer z listy `/gif-lista`")
-async def cmd_gif_usun(interaction: discord.Interaction, numer: app_commands.Range[int, 1, 50]):
+@app_commands.describe(
+    numer="Numer z listy `/gif-lista`",
+    typ="Z której listy usuwać",
+)
+@app_commands.choices(typ=[
+    app_commands.Choice(name="wygrana", value="win"),
+    app_commands.Choice(name="przegrana", value="loss"),
+])
+async def cmd_gif_usun(
+    interaction: discord.Interaction,
+    numer: app_commands.Range[int, 1, 50],
+    typ: app_commands.Choice[str] = None,
+):
     if not bot.is_owner(interaction):
         await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
         return
-    gifs = _win_gifs()
+    kind = (typ.value if typ else "win")
+    label = "wygranej" if kind == "win" else "przegranej"
+    gifs = _gifs_for(kind)
     if numer > len(gifs):
-        await interaction.response.send_message(f"Na liście jest tylko {len(gifs)} pozycji.", ephemeral=True)
+        await interaction.response.send_message(f"Na liście po {label} jest tylko {len(gifs)} pozycji.", ephemeral=True)
         return
     removed = gifs.pop(numer - 1)
-    db.set_config("win_gifs", json.dumps(gifs))
-    db.set_config("win_gif_last", None)
-    await interaction.response.send_message(f"Usunięto #{numer}: {removed[:80]}\nPozostało: {len(gifs)}.", ephemeral=True)
+    _set_gifs(kind, gifs)
+    await interaction.response.send_message(
+        f"Usunięto #{numer} (lista po {label}): {removed[:80]}\nPozostało: {len(gifs)}.",
+        ephemeral=True,
+    )
 
 
 
@@ -4522,84 +4153,6 @@ async def cmd_sklad_status(interaction: discord.Interaction):
     _, m = nxt
     mid = int(m["id"])
     await interaction.followup.send(embed=_lineup_status_embed(m, mid))
-
-
-
-@bot.tree.command(
-    name="zbiorka",
-    description="Ręczna zbiórka: kto ze składu nie potwierdził Gram (kanał + DM)",
-)
-async def cmd_zbiorka(interaction: discord.Interaction):
-    """Sztab: lista braków na kanale + DM do osób bez Gram."""
-    if not bot.is_staff(interaction):
-        await interaction.response.send_message(
-            "Tylko właściciel, kapitan, vicekapitan lub coach.",
-            ephemeral=True,
-        )
-        return
-    await interaction.response.defer(ephemeral=True)
-    try:
-        upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
-    except Exception as e:
-        await interaction.followup.send(f"Błąd API: {e}", ephemeral=True)
-        return
-    nxt = bot._next_match(upcoming)
-    if not nxt:
-        await interaction.followup.send("Brak nadchodzącego meczu.", ephemeral=True)
-        return
-    _, m = nxt
-    mid = int(m["id"])
-    ids = bot._lineup_ids(mid)
-    if not ids:
-        await interaction.followup.send(
-            "Brak zapisanego składu na ten mecz. Użyj `/sklad`.",
-            ephemeral=True,
-        )
-        return
-    confirms = _lineup_confirms(mid)
-    missing = [uid for uid in ids if confirms.get(str(uid)) != "yes"]
-    try:
-        opp = bot._opponent(m)
-    except Exception:
-        opp = _match_opponent(m)
-    when = embeds._match_dt(m)
-    when_s = when.strftime("%d.%m %H:%M") if when else "nie ustalono terminu"
-    if not missing:
-        await interaction.followup.send(
-            f"✅ Wszyscy ze składu potwierdzili **Gram** (vs **{opp}** · {when_s}).",
-            ephemeral=True,
-        )
-        return
-    mentions = " ".join(f"<@{uid}>" for uid in missing)
-    ch = interaction.channel
-    if interaction.guild and ch and hasattr(ch, "send"):
-        try:
-            body = (
-                f"⏰ **Zbiórka składu** — vs **{opp}** · {when_s}\n"
-                f"Brak potwierdzenia **Gram** ({len(missing)}):\n{mentions}\n"
-                f"_Potwierdź w DM od bota albo daj znać sztabowi._"
-            )
-            await ch.send(body)
-        except Exception as e:
-            log("zbiorka", f"channel send: {e}")
-    dm_text = (
-        f"⏰ **Zbiórka (ręczna)**\n"
-        f"Mecz vs **{opp}** · {when_s}\n"
-        f"Nie potwierdziłeś jeszcze **Gram**. Odpowiedz na DM ze składem albo daj znać kapitanowi."
-    )
-    sent = 0
-    for uid in missing:
-        try:
-            user = await bot.fetch_user_safe(uid)
-            if user:
-                await user.send(dm_text)
-                sent += 1
-        except Exception:
-            pass
-    await interaction.followup.send(
-        f"Zbiórka: **{len(missing)}** bez Gram · DM: {sent}/{len(missing)} · vs **{opp}**",
-        ephemeral=True,
-    )
 
 
 @bot.tree.command(name="ping-sklad", description="DM: ponów prośbę o potwierdzenie do osób bez odpowiedzi")
