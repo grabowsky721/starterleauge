@@ -2157,7 +2157,7 @@ class PindolzBot(commands.Bot):
             log("daily", f"API error: {e}")
             return
         now = datetime.now(TZ)
-        form = await asyncio.to_thread(self.api.get_form, history, limit=5)
+        form = await asyncio.to_thread(lambda: self.api.get_form(history, limit=5))
         standing = None
         try:
             standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
@@ -2304,7 +2304,7 @@ class PindolzBot(commands.Bot):
             db.set_config(key, "1")
             form = standing = opp_standing = None
             try:
-                form = await asyncio.to_thread(self.api.get_form, limit=5)
+                form = await asyncio.to_thread(lambda: self.api.get_form(limit=5))
             except Exception:
                 pass
             try:
@@ -2427,7 +2427,7 @@ class PindolzBot(commands.Bot):
             except Exception:
                 pass
             if match_data:
-                form = await asyncio.to_thread(self.api.get_form, history, limit=5) if history else None
+                form = await asyncio.to_thread(lambda h=history: self.api.get_form(h, limit=5)) if history else None
                 standing = None
                 try:
                     standing = (await asyncio.to_thread(self.api.get_pindolz_standing))
