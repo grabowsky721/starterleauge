@@ -98,6 +98,10 @@ COMMAND_START_ORDER = [
     "gif-dodaj",
     "gif-lista",
     "gif-usun",
+    "vc",
+    "vc-dzwiek-dodaj",
+    "vc-dzwiek-lista",
+    "vc-dzwiek-usun",
     "panel",
     "sklad-status",
     "ping-sklad",
@@ -349,6 +353,27 @@ def _set_gifs(kind: str, gifs: list[str]) -> None:
     key = "win_gifs" if kind == "win" else "loss_gifs"
     db.set_config(key, json.dumps(gifs))
     db.set_config("win_gif_last" if kind == "win" else "loss_gif_last", None)
+
+
+def _vc_sounds() -> list[dict]:
+    """Lista dźwięków VC: [{"name": str, "url": str}, ...] max 10."""
+    try:
+        data = json.loads(db.get_config("vc_sounds") or "[]")
+        if not isinstance(data, list):
+            return []
+        out = []
+        for item in data:
+            if isinstance(item, dict) and item.get("url") and item.get("name"):
+                out.append({"name": str(item["name"])[:32], "url": str(item["url"])[:300]})
+            elif isinstance(item, str) and item.startswith("https://"):
+                out.append({"name": f"Dźwięk {len(out)+1}", "url": item[:300]})
+        return out[:10]
+    except Exception:
+        return []
+
+
+def _set_vc_sounds(sounds: list[dict]) -> None:
+    db.set_config("vc_sounds", json.dumps(sounds[:10]))
 
 
 LOOP_NAMES = (
@@ -1521,6 +1546,110 @@ class GifRemoveSelect(discord.ui.Select):
         new_view = GifListaView(self.panel.owner_id, self.panel.kind)
         await interaction.response.edit_message(embed=new_view.build_embed(), view=new_view if gifs else None)
         await interaction.followup.send(f"Usunięto #{numer}: `{removed[:80]}`", ephemeral=True)
+
+
+class VcPanelView(discord.ui.View):
+    """Panel VC: odtwarzanie custom dźwięków, stop, wyjście."""
+
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=600)
+        self.guild_id = guild_id
+        sounds = _vc_sounds()
+        for i, s in enumerate(sounds[:5]):
+            self.add_item(VcPlayButton(i, s["name"]))
+
+    def build_embed(self, status: str | None = None) -> discord.Embed:
+        sounds = _vc_sounds()
+        emb = embeds._base("🔊 Panel VC", embeds.C_INFO)
+        lines = []
+        if sounds:
+            for i, s in enumerate(sounds, 1):
+                lines.append(f"**{i}.** {s['name']}")
+        else:
+            lines.append("Brak dźwięków. Dodaj: `/vc-dzwiek-dodaj`")
+        emb.description = "\n".join(lines)
+        if status:
+            emb.add_field(name="Status", value=status, inline=False)
+        emb.set_footer(text="Stop · Wyjdź · przyciski dźwięków (max 5 na panelu)")
+        return emb
+
+    def _vc(self, interaction: discord.Interaction):
+        g = interaction.guild
+        if not g:
+            return None
+        return g.voice_client
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.secondary, emoji="⏹️", row=2)
+    async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self._vc(interaction)
+        if vc and vc.is_playing():
+            vc.stop()
+            await interaction.response.edit_message(embed=self.build_embed("⏹️ Zatrzymano"), view=self)
+        else:
+            await interaction.response.send_message("Nic nie gra.", ephemeral=True)
+
+    @discord.ui.button(label="Wyjdź", style=discord.ButtonStyle.danger, emoji="🚪", row=2)
+    async def btn_leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self._vc(interaction)
+        if vc:
+            await vc.disconnect(force=True)
+            await interaction.response.edit_message(embed=self.build_embed("🚪 Rozłączono"), view=None)
+        else:
+            await interaction.response.send_message("Bot nie jest na VC.", ephemeral=True)
+
+    @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.primary, emoji="🔄", row=2)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        new = VcPanelView(self.guild_id)
+        await interaction.response.edit_message(embed=new.build_embed("🔄 Odświeżono"), view=new)
+
+
+class VcPlayButton(discord.ui.Button):
+    def __init__(self, idx: int, name: str):
+        super().__init__(
+            label=name[:80],
+            style=discord.ButtonStyle.success,
+            emoji="▶️",
+            row=0 if idx < 3 else 1,
+            custom_id=f"pindolz_vc_play:{idx}",
+        )
+        self.idx = idx
+
+    async def callback(self, interaction: discord.Interaction):
+        sounds = _vc_sounds()
+        if self.idx < 0 or self.idx >= len(sounds):
+            await interaction.response.send_message("Brak tego dźwięku.", ephemeral=True)
+            return
+        g = interaction.guild
+        if not g:
+            await interaction.response.send_message("Tylko na serwerze.", ephemeral=True)
+            return
+        vc = g.voice_client
+        if not vc or not vc.is_connected():
+            await interaction.response.send_message("Bot nie jest na VC. Użyj `/vc`.", ephemeral=True)
+            return
+        url = sounds[self.idx]["url"]
+        name = sounds[self.idx]["name"]
+        try:
+            if vc.is_playing():
+                vc.stop()
+            # wymaga ffmpeg na hostingu
+            source = discord.FFmpegPCMAudio(
+                url,
+                before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+                options="-vn",
+            )
+            vc.play(source)
+            view = VcPanelView(g.id)
+            await interaction.response.edit_message(
+                embed=view.build_embed(f"▶️ Gra: **{name}**"),
+                view=view,
+            )
+        except Exception as e:
+            log("vc", f"play error: {e}")
+            await interaction.response.send_message(
+                f"Nie udało się odtworzyć. Sprawdź link i czy hosting ma **ffmpeg**.\n`{type(e).__name__}: {e}`",
+                ephemeral=True,
+            )
 
 
 class CaptainPanelView(discord.ui.View):
@@ -4123,6 +4252,122 @@ async def cmd_gif_usun(
         ephemeral=True,
     )
 
+
+@bot.tree.command(name="vc", description="Wejdź na kanał głosowy i otwórz panel dźwięków")
+@app_commands.describe(kanal="Kanał VC (domyślnie ten, na którym jesteś)")
+async def cmd_vc(
+    interaction: discord.Interaction,
+    kanal: discord.VoiceChannel | None = None,
+):
+    if not interaction.guild:
+        await interaction.response.send_message("Tylko na serwerze.", ephemeral=True)
+        return
+    channel = kanal
+    if channel is None:
+        vs = getattr(interaction.user, "voice", None)
+        if vs and vs.channel:
+            channel = vs.channel
+    if channel is None:
+        await interaction.response.send_message(
+            "Wejdź na kanał głosowy albo podaj `kanal:` w komendzie.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        vc = interaction.guild.voice_client
+        if vc and vc.is_connected():
+            if vc.channel and vc.channel.id == channel.id:
+                pass  # już tu jesteśmy
+            else:
+                await vc.move_to(channel)
+        else:
+            await channel.connect(reconnect=True, timeout=15.0)
+    except Exception as e:
+        log("vc", f"connect error: {e}")
+        await interaction.followup.send(
+            f"Nie mogę wejść na VC. Uprawnienia (Connect/Speak) + **PyNaCl** na hostingu.\n`{type(e).__name__}: {e}`",
+            ephemeral=True,
+        )
+        return
+    view = VcPanelView(interaction.guild.id)
+    await interaction.followup.send(
+        embed=view.build_embed(f"Połączono: **{channel.name}**"),
+        view=view,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="vc-dzwiek-dodaj", description="Dodaj dźwięk do panelu VC (właściciel)")
+@app_commands.describe(
+    nazwa="Krótka nazwa na przycisku (max 32 znaki)",
+    link="Bezpośredni link https:// do pliku audio (mp3/ogg/wav) albo stream",
+)
+async def cmd_vc_dzwiek_dodaj(interaction: discord.Interaction, nazwa: str, link: str):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera.", ephemeral=True)
+        return
+    nazwa = nazwa.strip()[:32]
+    link = link.strip()
+    if not nazwa:
+        await interaction.response.send_message("Podaj nazwę.", ephemeral=True)
+        return
+    if not link.startswith("https://") or len(link) > 300 or any(c.isspace() for c in link):
+        await interaction.response.send_message(
+            "Podaj poprawny link `https://` (bez spacji, do 300 znaków).",
+            ephemeral=True,
+        )
+        return
+    sounds = _vc_sounds()
+    if any(s["url"] == link for s in sounds):
+        await interaction.response.send_message("Ten link już jest na liście.", ephemeral=True)
+        return
+    if len(sounds) >= 10:
+        await interaction.response.send_message("Max 10 dźwięków. Usuń coś: `/vc-dzwiek-usun`.", ephemeral=True)
+        return
+    sounds.append({"name": nazwa, "url": link})
+    _set_vc_sounds(sounds)
+    await interaction.response.send_message(
+        f"🔊 Dodano **{nazwa}** (#{len(sounds)}). Na panelu `/vc` widać pierwsze 5.\n{link}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="vc-dzwiek-lista", description="Lista dźwięków panelu VC")
+async def cmd_vc_dzwiek_lista(interaction: discord.Interaction):
+    sounds = _vc_sounds()
+    emb = embeds._base("🔊 Dźwięki VC", embeds.C_INFO)
+    if not sounds:
+        emb.description = "Brak. Dodaj: `/vc-dzwiek-dodaj`"
+    else:
+        emb.description = "\n".join(
+            f"**{i}.** {s['name']} — `{s['url'][:60]}…`" if len(s["url"]) > 60
+            else f"**{i}.** {s['name']} — `{s['url']}`"
+            for i, s in enumerate(sounds, 1)
+        )
+    emb.set_footer(text="Usuwanie: /vc-dzwiek-usun · Panel: /vc")
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+@bot.tree.command(name="vc-dzwiek-usun", description="Usuń dźwięk z panelu VC (właściciel)")
+@app_commands.describe(numer="Numer z /vc-dzwiek-lista")
+async def cmd_vc_dzwiek_usun(
+    interaction: discord.Interaction,
+    numer: app_commands.Range[int, 1, 10],
+):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera.", ephemeral=True)
+        return
+    sounds = _vc_sounds()
+    if numer > len(sounds):
+        await interaction.response.send_message(f"Na liście jest tylko {len(sounds)} pozycji.", ephemeral=True)
+        return
+    removed = sounds.pop(numer - 1)
+    _set_vc_sounds(sounds)
+    await interaction.response.send_message(
+        f"Usunięto #{numer}: **{removed['name']}**\nPozostało: {len(sounds)}.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="panel", description="Panel kapitana z przyciskami (też DM)")
