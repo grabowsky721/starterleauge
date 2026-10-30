@@ -81,7 +81,9 @@ COMMAND_START_ORDER = [
     "setup-ankiety",
     "setup-rola-sklad",
     "setup-ogloszenia",
+    "setup-aredl",
     "setup-all",
+    "aredl",
     "status",
     "wersja",
     "ankieta-role",
@@ -352,9 +354,142 @@ def _set_gifs(kind: str, gifs: list[str]) -> None:
 
 
 
+
+# ---------- AREDL (Geometry Dash demonlist) ----------
+AREDL_API = "https://api.aredl.net/v2"
+AREDL_DEFAULT_CLAN_ID = "1a3a76b0-dc51-4c2c-aeee-7b604fb979f5"
+AREDL_CLAN_URL = f"https://aredl.net/profile/clan/{AREDL_DEFAULT_CLAN_ID}"
+
+
+def _aredl_clan_id() -> str:
+    return (db.get_config("aredl_clan_id") or AREDL_DEFAULT_CLAN_ID).strip()
+
+
+def _aredl_get(path: str, params: dict | None = None) -> dict | list | None:
+    """GET do API AREDL; None przy błędzie."""
+    url = f"{AREDL_API}{path}"
+    try:
+        r = requests.get(
+            url,
+            params=params or {},
+            timeout=15,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "PINDOLZ-Bot/1.7 (Discord; +https://github.com/grabowsky721/starterleauge)",
+            },
+        )
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log("aredl", f"{path}: {type(e).__name__}: {e}")
+        return None
+
+
+def _aredl_clan() -> dict | None:
+    data = _aredl_get(f"/api/aredl/clan/{_aredl_clan_id()}")
+    return data if isinstance(data, dict) else None
+
+
+def _aredl_profile(nick: str) -> dict | None:
+    nick = (nick or "").strip().lstrip("@")
+    if not nick:
+        return None
+    data = _aredl_get(f"/api/aredl/profile/{nick}")
+    return data if isinstance(data, dict) else None
+
+
+def _aredl_clan_embed(data: dict) -> discord.Embed:
+    clan = data.get("clan") or {}
+    tag = clan.get("tag") or "?"
+    name = clan.get("global_name") or "?"
+    emb = embeds._base(f"[{tag}] {name} · AREDL", embeds.C_INFO)
+    desc = clan.get("description") or "Brak opisu."
+    emb.description = str(desc)[:500]
+    rank = data.get("rank")
+    emb.add_field(name="Ranking", value=str(rank) if rank is not None else "—", inline=True)
+    records = data.get("records") or []
+    members = data.get("members_points") or []
+    emb.add_field(name="Członkowie (punkty)", value=str(len(members)), inline=True)
+    emb.add_field(name="Recordy klanu", value=str(len(records)), inline=True)
+    if members:
+        lines = []
+        for m in members[:10]:
+            u = m.get("user") or m
+            un = u.get("global_name") or u.get("username") or "?"
+            pts = m.get("total_points") or m.get("points") or "—"
+            lines.append(f"• **{un}** — {pts} pkt")
+        emb.add_field(name="Top członkowie", value="\n".join(lines)[:1000], inline=False)
+    if records:
+        lines = []
+        for rec in records[:8]:
+            lvl = rec.get("level") or {}
+            lname = lvl.get("name") or "?"
+            pos = lvl.get("position")
+            who = (rec.get("submitter") or rec.get("user") or {})
+            if isinstance(who, dict):
+                wname = who.get("global_name") or who.get("username") or ""
+            else:
+                wname = ""
+            bit = f"#{pos} {lname}" if pos is not None else lname
+            if wname:
+                bit = f"{bit} — {wname}"
+            lines.append(f"• {bit}")
+        emb.add_field(name="Ostatnie recordy", value="\n".join(lines)[:1000], inline=False)
+    emb.add_field(name="Profil", value=f"[aredl.net]({AREDL_CLAN_URL})", inline=False)
+    return emb
+
+
+def _aredl_player_embed(data: dict) -> discord.Embed:
+    uname = data.get("global_name") or data.get("username") or "?"
+    user = data.get("username") or uname
+    emb = embeds._base(f"{uname} · AREDL", embeds.C_INFO)
+    if data.get("description"):
+        emb.description = str(data["description"])[:400]
+    clan = data.get("clan") or {}
+    if clan:
+        emb.add_field(
+            name="Klan",
+            value=f"[{clan.get('tag') or '?'}] {clan.get('global_name') or '?'}",
+            inline=True,
+        )
+    rank = data.get("rank") or {}
+    if rank:
+        emb.add_field(name="Punkty", value=str(rank.get("total_points") or "—"), inline=True)
+        emb.add_field(name="Extremes", value=str(rank.get("extremes") or "—"), inline=True)
+        emb.add_field(name="Rank (pkt)", value=str(rank.get("rank") or "—"), inline=True)
+        emb.add_field(name="Rank extremes", value=str(rank.get("extremes_rank") or "—"), inline=True)
+        emb.add_field(name="Rank hardest", value=str(rank.get("hardest_rank") or "—"), inline=True)
+        emb.add_field(name="Rank kraju", value=str(rank.get("country_rank") or "—"), inline=True)
+    records = data.get("records") or []
+    if records:
+        lines = []
+        for rec in records[:8]:
+            lvl = rec.get("level") or {}
+            lname = lvl.get("name") or "?"
+            pos = lvl.get("position")
+            pts = lvl.get("points")
+            bit = f"#{pos} **{lname}**" if pos is not None else f"**{lname}**"
+            if pts is not None:
+                bit += f" ({pts} pkt)"
+            lines.append(f"• {bit}")
+        emb.add_field(name=f"Recordy ({len(records)})", value="\n".join(lines)[:1000], inline=False)
+    emb.add_field(
+        name="Profil",
+        value=f"[aredl.net/profile/{user}](https://aredl.net/profile/{user})",
+        inline=False,
+    )
+    av = data.get("discord_avatar")
+    did = data.get("discord_id")
+    if av and did:
+        emb.set_thumbnail(url=f"https://cdn.discordapp.com/avatars/{did}/{av}.png?size=128")
+    return emb
+
+
 LOOP_NAMES = (
     "table_update", "daily_check", "prematch_check", "live_check", "weekly_summary", "status_loop",
-    "poll_check", "event_check", "update_check", "api_watch", "cleanup_task", "scheduled_messages_loop",
+    "poll_check", "event_check", "update_check", "api_watch", "cleanup_task", "scheduled_messages_loop", "aredl_check",
 )
 
 # Klucze konfiguracji tworzone osobno dla każdego meczu (sprzątane po 60 dniach bez zmian)
@@ -1852,6 +1987,10 @@ class PindolzBot(commands.Bot):
             if not self.scheduled_messages_loop.is_running():
                 self.scheduled_messages_loop.start()
 
+        async def start_aredl():
+            if not self.aredl_check.is_running():
+                self.aredl_check.start()
+
         # Faza 1 – mecz
         await run_step("live", START_DELAY_LIVE, start_live)
         await run_step("prematch", START_DELAY_PREMATCH - START_DELAY_LIVE, start_prematch)
@@ -1868,6 +2007,7 @@ class PindolzBot(commands.Bot):
         await run_step("cleanup", START_DELAY_CLEANUP - START_DELAY_EVENT, start_cleanup)
         await run_step("update", START_DELAY_UPDATE - START_DELAY_CLEANUP, start_update)
         await run_step("scheduled", 0, start_scheduled)
+        await run_step("aredl", 0, start_aredl)
         await run_step("weekly", START_DELAY_WEEKLY - START_DELAY_UPDATE, start_weekly)
 
         if not self.loop_watchdog.is_running():
@@ -2630,6 +2770,77 @@ class PindolzBot(commands.Bot):
             except Exception as e:
                 log("zaplanuj", f"#{sid}: {e}")
 
+
+
+
+    @tasks.loop(minutes=12)
+    @guarded
+    async def aredl_check(self):
+        """Nowe zatwierdzone recordy klanu AREDL → kanał + opcjonalny ping roli."""
+        ch_id = db.get_config_int("aredl_channel_id")
+        if not ch_id:
+            return
+        data = await asyncio.to_thread(_aredl_clan)
+        if not data:
+            return
+        records = data.get("records") or []
+        if not isinstance(records, list):
+            return
+        try:
+            seen = set(json.loads(db.get_config("aredl_seen_records") or "[]"))
+        except Exception:
+            seen = set()
+        # pierwsze uruchomienie – tylko zapamiętaj, bez spamu historycznych
+        if not seen and records:
+            ids = []
+            for rec in records:
+                rid = rec.get("id")
+                if rid:
+                    ids.append(str(rid))
+            db.set_config("aredl_seen_records", json.dumps(ids[-200:]))
+            return
+        new_recs = []
+        for rec in records:
+            rid = str(rec.get("id") or "")
+            if not rid or rid in seen:
+                continue
+            new_recs.append(rec)
+            seen.add(rid)
+        if not new_recs:
+            return
+        db.set_config("aredl_seen_records", json.dumps(list(seen)[-300:]))
+        channel = await self.get_channel_safe(ch_id)
+        if not channel:
+            return
+        role_id = db.get_config_int("aredl_role_id")
+        ping = f"<@&{role_id}>" if role_id else ""
+        clan = data.get("clan") or {}
+        tag = clan.get("tag") or "Pdlz"
+        for rec in new_recs[:5]:
+            lvl = rec.get("level") or {}
+            lname = lvl.get("name") or "?"
+            pos = lvl.get("position")
+            pts = lvl.get("points")
+            who = rec.get("submitter") or rec.get("user") or {}
+            wname = "?"
+            if isinstance(who, dict):
+                wname = who.get("global_name") or who.get("username") or "?"
+            pos_s = f"#{pos}" if pos is not None else "—"
+            pts_s = f"{pts} pkt" if pts is not None else "—"
+            emb = embeds._base(f"✅ Record zatwierdzony · [{tag}]", embeds.C_WIN if hasattr(embeds, "C_WIN") else embeds.C_INFO)
+            emb.description = f"**{wname}** ukończył **{lname}** ({pos_s}, {pts_s})"
+            vid = rec.get("video_url")
+            if vid:
+                emb.add_field(name="Wideo", value=vid[:200], inline=False)
+            emb.add_field(name="Klan", value=f"[Profil]({AREDL_CLAN_URL})", inline=True)
+            try:
+                await channel.send(content=ping or None, embed=emb)
+            except Exception as e:
+                log("aredl", f"send: {e}")
+
+    @aredl_check.before_loop
+    async def before_aredl_check(self):
+        await self.wait_until_ready()
 
     async def _trening_advance_to_hours(self, interaction: discord.Interaction, pid: int, data: dict):
         if data.get("phase") != "days":
@@ -3945,6 +4156,68 @@ async def cmd_setup_ogloszenia(interaction: discord.Interaction, kanal: discord.
         f"Kanał ogłoszeń: {kanal.mention}\nTam bot pisze tylko o treningach (ankiety i ustalony termin).",
         ephemeral=True,
     )
+
+
+
+
+@bot.tree.command(name="setup-aredl", description="Ustaw kanał i rolę ping dla alertów AREDL (właściciel)")
+@app_commands.describe(
+    kanal="Kanał na alerty o nowych recordach klanu",
+    rola="Rola do pingu przy nowym recordzie (opcjonalnie)",
+)
+async def cmd_setup_aredl(
+    interaction: discord.Interaction,
+    kanal: discord.TextChannel,
+    rola: discord.Role | None = None,
+):
+    if not bot.is_owner(interaction):
+        await interaction.response.send_message("Tylko właściciel serwera może to użyć.", ephemeral=True)
+        return
+    db.set_config("aredl_channel_id", str(kanal.id))
+    if rola is not None:
+        db.set_config("aredl_role_id", str(rola.id))
+    else:
+        db.set_config("aredl_role_id", None)
+    # domyślny klan Pindolz, jeśli nie ustawiono
+    if not db.get_config("aredl_clan_id"):
+        db.set_config("aredl_clan_id", AREDL_DEFAULT_CLAN_ID)
+    role_txt = rola.mention if rola else "brak (bez pingu)"
+    msg = "\n".join([
+        "**AREDL ustawione**",
+        f"Kanał alertów: {kanal.mention}",
+        f"Ping roli: {role_txt}",
+        f"Klan: `{_aredl_clan_id()}`",
+        "Komendy: `/aredl` · `/aredl nick:…`",
+    ])
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="aredl", description="Statystyki klanu AREDL lub gracza (podaj nick)")
+@app_commands.describe(nick="Nick AREDL / GD (puste = klan Pindolz)")
+async def cmd_aredl(interaction: discord.Interaction, nick: str | None = None):
+    await interaction.response.defer(ephemeral=False)
+    try:
+        if nick and nick.strip():
+            data = await asyncio.to_thread(_aredl_profile, nick.strip())
+            if not data:
+                await interaction.followup.send(
+                    f"Nie znaleziono gracza **{nick.strip()}** na AREDL.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(embed=_aredl_player_embed(data))
+            return
+        data = await asyncio.to_thread(_aredl_clan)
+        if not data:
+            await interaction.followup.send(
+                "Nie udało się pobrać klanu AREDL. Spróbuj za chwilę.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(embed=_aredl_clan_embed(data))
+    except Exception as e:
+        log("aredl", f"cmd: {e}")
+        await interaction.followup.send(f"Błąd AREDL: `{type(e).__name__}`", ephemeral=True)
 
 
 @bot.tree.command(name="ankieta-role", description="Panel ról do ankiet (interfejs; właściciel)")
