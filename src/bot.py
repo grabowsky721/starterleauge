@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import functools
 import json
 import os
@@ -44,6 +46,9 @@ BOT_VERSION = load_version()
 GITHUB_REPO = "grabowsky721/starterleauge"
 GITHUB_BRANCH = "main"
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+CF_ACCOUNT_ID = (os.getenv("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+CF_API_TOKEN = (os.getenv("CLOUDFLARE_API_TOKEN") or "").strip()
+CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 TZ = ZoneInfo("Europe/Warsaw")
 
 TABLE_UPDATE_TIMES = [
@@ -200,6 +205,72 @@ FEATURES = {
 
 def feature_on(name: str) -> bool:
     return db.get_config(f"feat_{name}") != "0"
+
+
+def cf_image_enabled() -> bool:
+    return bool(CF_ACCOUNT_ID and CF_API_TOKEN)
+
+
+def generate_cf_image(prompt: str, steps: int = 4) -> bytes | None:
+    """Cloudflare Workers AI FLUX – zwraca JPEG bytes albo None."""
+    if not cf_image_enabled():
+        return None
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
+        f"/ai/run/{CF_IMAGE_MODEL}"
+    )
+    try:
+        r = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {CF_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={"prompt": (prompt or "")[:2000], "steps": int(steps)},
+            timeout=90,
+        )
+        if r.status_code >= 400:
+            log("cf-image", f"HTTP {r.status_code}: {r.text[:240]}")
+            return None
+        try:
+            data = r.json()
+        except Exception:
+            log("cf-image", "odpowiedź nie jest JSON")
+            return None
+        if not isinstance(data, dict):
+            return None
+        img_b64 = (data.get("result") or {}).get("image") or data.get("image")
+        if not img_b64:
+            log("cf-image", f"brak image w odpowiedzi: {str(data)[:200]}")
+            return None
+        return base64.b64decode(img_b64)
+    except Exception as e:
+        log("cf-image", str(e))
+        return None
+
+
+def match_image_prompt(match: dict, kind: str = "preview") -> str:
+    """Prompt do grafiki meczowej (esport CS2)."""
+    try:
+        t1 = embeds._team_name(match, "team1")
+        t2 = embeds._team_name(match, "team2")
+    except Exception:
+        t1, t2 = "PINDOLZ", "Opponent"
+    if kind == "result":
+        try:
+            score = embeds._score_str(match)
+        except Exception:
+            s = match.get("score") or {}
+            score = f"{s.get('team1', '?')}:{s.get('team2', '?')}"
+        return (
+            f"Epic esports CS2 match result poster, dark cyber arena, neon orange and blue lights, "
+            f"bold text '{t1} {score} {t2}', championship graphic, high quality, cinematic, no watermark"
+        )
+    return (
+        f"Epic esports CS2 match announcement poster, dark cyber arena, neon lights, "
+        f"bold text '{t1} vs {t2}', coming soon, championship graphic, high quality, cinematic, no watermark"
+    )
+
 
 
 def log(tag: str, msg: str) -> None:
@@ -2332,6 +2403,16 @@ class PindolzBot(commands.Bot):
             msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None, view=gg_view(mid))
             await self._react_result(ch_id, msg_id, m)
             await self._post_win_gif(ch_id, m)
+            try:
+                live_ch = await self.get_channel_safe(self._live_channel_id())
+                await self.send_match_image(
+                    live_ch or channel,
+                    m,
+                    kind="result",
+                    content="🏁 **Wynik meczu**",
+                )
+            except Exception as e:
+                log("cf-image", f"result daily: {e}")
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             await self._start_mvp_vote(channel, m)
             try:
@@ -2376,6 +2457,17 @@ class PindolzBot(commands.Bot):
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid))
+            try:
+                if not db.get_config(f"preview_img_{mid}"):
+                    await self.send_match_image(
+                        channel,
+                        m,
+                        kind="preview",
+                        content="🗓️ **Nadchodzący mecz**",
+                    )
+                    db.set_config(f"preview_img_{mid}", "1")
+            except Exception as e:
+                log("cf-image", f"preview: {e}")
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, status="scheduled", notified_upcoming=1, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
 
     PREMATCH_MINUTES = 30
@@ -2585,6 +2677,15 @@ class PindolzBot(commands.Bot):
                         msg_id, ch_id = await self._edit_or_send(main_ch, embeds.result_embed(match_data, form=form, standing=standing), None, None, view=gg_view(mid))
                         await self._react_result(ch_id, msg_id, match_data)
                         await self._post_win_gif(ch_id, match_data)
+                        try:
+                            await self.send_match_image(
+                                main_ch,
+                                match_data,
+                                kind="result",
+                                content="🏁 **Wynik meczu**",
+                            )
+                        except Exception as e:
+                            log("cf-image", f"result live: {e}")
                         db.upsert_match(mid, notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
                 db.upsert_match(mid, status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=match_data.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat())
             else:
@@ -3633,6 +3734,29 @@ class PindolzBot(commands.Bot):
                 await ch.send(gifs[idx])
         except Exception as e:
             print(f"[gif] send error: {e}")
+
+
+    async def send_match_image(
+        self,
+        channel: discord.abc.Messageable | None,
+        match: dict,
+        kind: str = "preview",
+        content: str | None = None,
+    ) -> None:
+        """Generuje grafikę Cloudflare Workers AI i wysyła na kanał."""
+        if not channel or not cf_image_enabled():
+            return
+        try:
+            prompt = match_image_prompt(match, kind)
+            data = await asyncio.to_thread(generate_cf_image, prompt, 4)
+            if not data:
+                return
+            fname = "preview.jpg" if kind == "preview" else "result.jpg"
+            f = discord.File(io.BytesIO(data), filename=fname)
+            await channel.send(content=content, file=f)
+            log("cf-image", f"wysłano {kind} mid={match.get('id')}")
+        except Exception as e:
+            log("cf-image", f"send: {e}")
 
     async def _post_win_gif(self, ch_id, match: dict):
         """Alias wsteczny – wywołuje uniwersalny post (win lub loss)."""
