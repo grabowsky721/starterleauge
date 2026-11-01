@@ -2874,7 +2874,7 @@ class PindolzBot(commands.Bot):
 
 
 
-    @tasks.loop(minutes=12)
+    @tasks.loop(minutes=8)
     @guarded
     async def aredl_check(self):
         """Nowe zatwierdzone recordy klanu AREDL → kanał + opcjonalny ping roli."""
