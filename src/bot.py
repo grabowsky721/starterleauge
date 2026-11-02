@@ -1999,7 +1999,7 @@ class PindolzBot(commands.Bot):
             self._live_channel_id(),
             self._table_channel_id(),
         )
-        emb.set_footer(text="Ta wiadomość zniknie za 2 minuty")
+        emb.set_footer(text="PV właściciela · zniknie za ~2 min")
         emb.title = f"🚀 Start bota ({done_n}/{total})"
         emb.description = f"Wersja **`{BOT_VERSION}`** · soft-start w toku"
         if done_n >= total:
@@ -5172,24 +5172,43 @@ async def on_ready():
     bot._announced = True
 
     async def _send_restart_notice():
-        channel = await bot.get_channel_safe(bot._main_channel_id())
-        if not channel:
-            return
+        """Soft-start tylko na PV właściciela serwera (nie na kanał publiczny)."""
         try:
             emb = bot._boot_progress_embed(set(), current="live")
-            msg = await channel.send(embed=emb)
+            emb.set_footer(text="Tylko Ty to widzisz (PV) · zniknie za ~2 min")
+
+            owner = None
+            # Preferuj guild kanału głównego
+            main_id = bot._main_channel_id()
+            if main_id:
+                ch = await bot.get_channel_safe(main_id)
+                if ch and getattr(ch, "guild", None) and ch.guild.owner:
+                    owner = ch.guild.owner
+            if owner is None:
+                for g in bot.guilds:
+                    if g.owner:
+                        owner = g.owner
+                        break
+            if owner is None:
+                log("boot", "brak właściciela serwera – pomijam PV startu")
+                return
+
+            msg = await owner.send(embed=emb)
             bot._boot_msg = msg
 
             async def _delete_later():
-                await asyncio.sleep(120)  # usuń wiadomość startu po 2 min
+                await asyncio.sleep(120)
                 try:
                     await msg.delete()
                 except Exception:
                     pass
 
             asyncio.create_task(_delete_later())
+            log("boot", f"start PV → {owner.id}")
+        except discord.Forbidden:
+            log("boot", "nie mogę wysłać PV do właściciela (zamknięte DM / brak wspólnego serwera)")
         except Exception as e:
-            print(f"[restart-msg] {e}")
+            log("boot", f"restart-msg: {e}")
 
     asyncio.create_task(_send_restart_notice())
 
