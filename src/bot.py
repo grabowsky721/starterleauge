@@ -5173,42 +5173,50 @@ async def on_ready():
 
     async def _send_restart_notice():
         """Soft-start tylko na PV właściciela serwera (nie na kanał publiczny)."""
-        try:
-            emb = bot._boot_progress_embed(set(), current="live")
-            emb.set_footer(text="Tylko Ty to widzisz (PV) · zniknie za ~2 min")
+        emb = bot._boot_progress_embed(set(), current="live")
+        emb.set_footer(text="Tylko Ty to widzisz (PV) · zniknie za ~2 min")
 
-            owner = None
-            # Preferuj guild kanału głównego
-            main_id = bot._main_channel_id()
-            if main_id:
-                ch = await bot.get_channel_safe(main_id)
-                if ch and getattr(ch, "guild", None) and ch.guild.owner:
-                    owner = ch.guild.owner
-            if owner is None:
-                for g in bot.guilds:
-                    if g.owner:
-                        owner = g.owner
-                        break
-            if owner is None:
-                log("boot", "brak właściciela serwera – pomijam PV startu")
+        # Zbierz owner_id (bez intents.members guild.owner bywa None)
+        owner_ids: list[int] = []
+        main_id = bot._main_channel_id()
+        if main_id:
+            ch = await bot.get_channel_safe(main_id)
+            g = getattr(ch, "guild", None) if ch else None
+            if g and g.owner_id:
+                owner_ids.append(int(g.owner_id))
+        for g in bot.guilds:
+            if g.owner_id and int(g.owner_id) not in owner_ids:
+                owner_ids.append(int(g.owner_id))
+
+        if not owner_ids:
+            log("boot", "brak owner_id – pomijam PV startu")
+            return
+
+        last_err = None
+        for oid in owner_ids:
+            try:
+                user = bot.get_user(oid) or await bot.fetch_user(oid)
+                msg = await user.send(embed=emb)
+                bot._boot_msg = msg
+
+                async def _delete_later(m=msg):
+                    await asyncio.sleep(120)
+                    try:
+                        await m.delete()
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_delete_later())
+                log("boot", f"start PV → {oid}")
                 return
+            except discord.Forbidden as e:
+                last_err = e
+                log("boot", f"PV forbidden do {oid} (DM zamknięte?)")
+            except Exception as e:
+                last_err = e
+                log("boot", f"PV do {oid}: {type(e).__name__}: {e}")
 
-            msg = await owner.send(embed=emb)
-            bot._boot_msg = msg
-
-            async def _delete_later():
-                await asyncio.sleep(120)
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-
-            asyncio.create_task(_delete_later())
-            log("boot", f"start PV → {owner.id}")
-        except discord.Forbidden:
-            log("boot", "nie mogę wysłać PV do właściciela (zamknięte DM / brak wspólnego serwera)")
-        except Exception as e:
-            log("boot", f"restart-msg: {e}")
+        log("boot", f"nie wysłano PV startu: {last_err}")
 
     asyncio.create_task(_send_restart_notice())
 
