@@ -89,6 +89,7 @@ COMMAND_START_ORDER = [
     "setup-aredl",
     "setup-all",
     "aredl",
+    "aredl-top",
     "status",
     "wersja",
     "ankieta-role",
@@ -199,7 +200,11 @@ FEATURES = {
     "polls": ("Ankiety", "🗳️ Ankieta „Kto może grać?”"),
     "rank": ("Awans/spadek", "📈 Powiadomienie o zmianie miejsca w tabeli"),
     "alerts": ("Alerty API", "🚨 Wiadomość prywatna o awarii API"),
-    "quiet": ("Ciche godziny", "🌙 W nocy (23–8) tylko LIVE – bez tabeli/daily/prematch"),
+    "quiet": ("Ciche godziny", "🌙 W nocy (23–8) – poniżej co jest wyciszane"),
+    "quiet_table": ("Ciche: tabela", "🌙 Nie aktualizuj tabeli w nocy"),
+    "quiet_prematch": ("Ciche: prematch", "🌙 Bez przypomnień 60/30/10 w nocy"),
+    "quiet_daily": ("Ciche: daily", "🌙 Bez daily (wyniki/upcoming) w nocy"),
+    "quiet_aredl": ("Ciche: AREDL", "🌙 Bez alertów AREDL w nocy (domyślnie WYŁ.)"),
 }
 
 
@@ -355,12 +360,23 @@ async def safe_ephemeral(interaction: discord.Interaction, content: str = None, 
 
 
 
-def quiet_now() -> bool:
-    """True gdy włączone ciche godziny i jesteśmy w oknie 23:00–07:59 Europe/Warsaw."""
+def quiet_now(feature: str | None = None) -> bool:
+    """True gdy ciche godziny aktywne (23–8) i dana funkcja jest wyciszona.
+
+    feature: "table" | "prematch" | "daily" | "aredl" | None (ogólny flag).
+    quiet_aredl domyślnie OFF (trzeba włączyć w /ustawienia).
+    """
     if not feature_on("quiet"):
         return False
     h = datetime.now(TZ).hour
-    return h >= 23 or h < 8
+    if not (h >= 23 or h < 8):
+        return False
+    if feature is None:
+        return True
+    if feature == "aredl":
+        return db.get_config("feat_quiet_aredl") == "1"
+    # table / prematch / daily – domyślnie wyciszone (feat != "0")
+    return feature_on(f"quiet_{feature}")
 
 
 def _sched_key(sid: int) -> str:
@@ -1076,9 +1092,36 @@ class TreningSetupView(discord.ui.View):
         msg = await channel.send(content=content, embed=emb, view=training_view(pid, data))
         data["message_id"] = msg.id
         _save_training(pid, data)
+        try:
+            db.set_config("trening_last_days", json.dumps(days))
+            db.set_config("trening_last_hours", json.dumps(list(DEFAULT_HOURS)))
+        except Exception:
+            pass
         await interaction.followup.send(
             f"✅ Ankieta dni **#{pid}** na {channel.mention}.\n"
             f"Po głosowaniu kliknij **Dalej: godziny** (sztab).",
+            ephemeral=True,
+        )
+
+
+    @discord.ui.button(label="Jak tydzień temu", style=discord.ButtonStyle.secondary, row=2)
+    async def reuse_last(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            days = json.loads(db.get_config("trening_last_days") or "[]")
+        except Exception:
+            days = []
+        if not days:
+            await interaction.response.send_message(
+                "Brak zapisanego treningu. Najpierw opublikuj ankietę normalnie.",
+                ephemeral=True,
+            )
+            return
+        self.selected_days = list(days)
+        labels = [dict(WEEKDAYS_PL).get(k, k) for k in self.selected_days]
+        await interaction.response.send_message(
+            "Wczytano dni z ostatniego treningu: **"
+            + ", ".join(labels)
+            + "**. Kliknij **Opublikuj ankietę dni**.",
             ephemeral=True,
         )
 
@@ -2306,7 +2349,7 @@ class PindolzBot(commands.Bot):
     @tasks.loop(time=TABLE_UPDATE_TIMES)
     @guarded
     async def table_update(self):
-        if quiet_now():
+        if quiet_now("table"):
             return
         await self._run_table_update()
 
@@ -2351,7 +2394,7 @@ class PindolzBot(commands.Bot):
     @tasks.loop(minutes=10)
     @guarded
     async def daily_check(self):
-        if quiet_now():
+        if quiet_now("daily"):
             return
         await self._run_daily_check()
 
@@ -2502,7 +2545,7 @@ class PindolzBot(commands.Bot):
     @tasks.loop(minutes=1)
     @guarded
     async def prematch_check(self):
-        if quiet_now():
+        if quiet_now("prematch"):
             return
         channel = await self.get_channel_safe(self._main_channel_id())
         try:
@@ -2878,6 +2921,8 @@ class PindolzBot(commands.Bot):
     @guarded
     async def aredl_check(self):
         """Nowe zatwierdzone recordy klanu AREDL → kanał + opcjonalny ping roli."""
+        if quiet_now("aredl"):
+            return
         ch_id = db.get_config_int("aredl_channel_id")
         if not ch_id:
             return
@@ -4051,6 +4096,58 @@ async def cmd_tabela(interaction: discord.Interaction):
     await interaction.followup.send(embed=embeds.standings_embed(table, changes=bot._rank_changes(table)), view=refresh_view("tabela"))
 
 
+class PomocView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(PomocSelect())
+
+
+class PomocSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Mecze i liga", value="mecze", emoji="📊"),
+            discord.SelectOption(label="Skład i sztab", value="sklad", emoji="👥"),
+            discord.SelectOption(label="AREDL", value="aredl", emoji="🎮"),
+            discord.SelectOption(label="Setup / admin", value="setup", emoji="⚙️"),
+            discord.SelectOption(label="Automaty", value="auto", emoji="🤖"),
+        ]
+        super().__init__(placeholder="Wybierz kategorię…", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        emb = _pomoc_category_embed(self.values[0])
+        await interaction.response.edit_message(embed=emb, view=self.view)
+
+
+def _pomoc_category_embed(cat: str) -> discord.Embed:
+    emb = embeds._base("📖 Pomoc PINDOLZ", embeds.C_INFO)
+    if cat == "mecze":
+        emb.title = "📊 Mecze i liga"
+        emb.description = (
+            "`/pindolz` · `/nadchodzace` · `/wyniki` · `/live` · `/tabela`\n"
+            "`/gracze` · `/wersja` · `/status`"
+        )
+    elif cat == "sklad":
+        emb.title = "👥 Skład i sztab"
+        emb.description = (
+            "`/sklad` · `/panel` · `/polacz` · `/ping-sklad` · `/moj-status`\n"
+            "`/trening` · `/ogloszenie` · `/zaplanuj`"
+        )
+    elif cat == "aredl":
+        emb.title = "🎮 AREDL"
+        emb.description = "`/aredl` · `/aredl nick:` · `/aredl-top`\n`/setup-aredl`"
+    elif cat == "setup":
+        emb.title = "⚙️ Setup / admin"
+        emb.description = (
+            "`/setup*` · `/ustawienia` (ciche godziny per funkcja)\n"
+            "`/gif-*` · `/pokaz-embedy`"
+        )
+    else:
+        emb.title = "🤖 Automaty"
+        emb.description = "Prematch · LIVE · tabela · GIF · AI\nAREDL (~8 min) · weekly · ciche 23–8"
+    emb.set_footer(text="Wybierz inną kategorię z listy poniżej")
+    return emb
+
+
 @bot.tree.command(name="pomoc", description="Lista komend i automatów bota")
 async def cmd_pomoc(interaction: discord.Interaction):
     if interaction.guild is None:
@@ -4081,7 +4178,9 @@ async def cmd_pomoc(interaction: discord.Interaction):
         emb.set_footer(text="Wymagany wspólny serwer z botem · DM od bota tylko jeśli możesz otrzymywać PW")
         await interaction.response.send_message(embed=emb)
         return
-    await interaction.response.send_message(embed=embeds.help_embed(), ephemeral=True)
+    emb = embeds._base("📖 Pomoc PINDOLZ", embeds.C_INFO)
+    emb.description = "Wybierz kategorię z listy poniżej."
+    await interaction.response.send_message(embed=emb, view=PomocView(), ephemeral=True)
 
 
 @bot.tree.command(name="wersja", description="Aktualna wersja bota")
@@ -4343,6 +4442,50 @@ async def cmd_aredl(interaction: discord.Interaction, nick: str | None = None):
         log("aredl", f"cmd: {e}")
         await interaction.followup.send(f"Błąd AREDL: `{type(e).__name__}`", ephemeral=True)
 
+
+
+
+@bot.tree.command(name="aredl-top", description="Ranking członków klanu AREDL (punkty)")
+async def cmd_aredl_top(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    try:
+        data = await asyncio.to_thread(_aredl_clan)
+        if not data:
+            await interaction.followup.send("Nie udało się pobrać klanu AREDL.", ephemeral=True)
+            return
+        clan = data.get("clan") or {}
+        tag = clan.get("tag") or "Pdlz"
+        name = clan.get("global_name") or "Pindolz"
+        members = data.get("members_points") or []
+        emb = embeds._base(f"🏆 [{tag}] {name} · ranking", embeds.C_INFO)
+        if not members:
+            emb.description = (
+                "Brak danych członków / punktów w API "
+                "(klan nowy albo nikt nie ma jeszcze recordów)."
+            )
+            emb.add_field(name="Profil", value=f"[aredl.net]({AREDL_CLAN_URL})", inline=False)
+            await interaction.followup.send(embed=emb)
+            return
+        # sort by points desc
+        def _pts(m):
+            try:
+                return float(m.get("total_points") or m.get("points") or 0)
+            except Exception:
+                return 0.0
+        members = sorted(members, key=_pts, reverse=True)
+        lines = []
+        for i, m in enumerate(members[:15], 1):
+            u = m.get("user") or m
+            un = u.get("global_name") or u.get("username") or "?"
+            pts = m.get("total_points") if m.get("total_points") is not None else m.get("points")
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i}.`")
+            lines.append(f"{medal} **{un}** — {pts if pts is not None else '—'} pkt")
+        emb.description = "\n".join(lines)[:4000]
+        emb.add_field(name="Profil klanu", value=f"[aredl.net]({AREDL_CLAN_URL})", inline=False)
+        await interaction.followup.send(embed=emb)
+    except Exception as e:
+        log("aredl", f"top: {e}")
+        await interaction.followup.send(f"Błąd: `{type(e).__name__}`", ephemeral=True)
 
 @bot.tree.command(name="ankieta-role", description="Panel ról do ankiet (interfejs; właściciel)")
 async def cmd_ankieta_role(interaction: discord.Interaction):
