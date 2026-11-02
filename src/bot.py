@@ -3717,14 +3717,33 @@ class PindolzBot(commands.Bot):
                 except Exception as e:
                     log("event", f"edit error: {e}")
             return
+        # Nie spamuj API po nieudanym create
+        fails = 0
         try:
+            fails = int(db.get_config(f"event_fail_{mid}") or "0")
+        except Exception:
+            fails = 0
+        if fails >= 3:
+            return
+
+        try:
+            start_utc = dt.astimezone(ZoneInfo("UTC")) if getattr(dt, "tzinfo", None) else dt.replace(tzinfo=TZ).astimezone(ZoneInfo("UTC"))
+            end_utc = end.astimezone(ZoneInfo("UTC")) if getattr(end, "tzinfo", None) else end.replace(tzinfo=TZ).astimezone(ZoneInfo("UTC"))
             ev = await guild.create_scheduled_event(
-                name=name, start_time=dt, end_time=end, location="StarterLeague · online", description=desc,
+                name=name,
+                start_time=start_utc,
+                end_time=end_utc,
+                description=desc,
+                location="StarterLeague · online",
+                entity_type=discord.EntityType.external,
+                privacy_level=discord.PrivacyLevel.guild_only,
             )
         except Exception as e:
-            log("event", f"create error: {e}")
+            db.set_config(f"event_fail_{mid}", str(fails + 1))
+            log("event", f"create error ({fails + 1}/3): {e}")
             return
         db.set_config(f"event_{mid}", str(ev.id))
+        db.set_config(f"event_fail_{mid}", "0")
         log("event", f"utworzono wydarzenie meczu {mid}")
 
     @event_check.before_loop
