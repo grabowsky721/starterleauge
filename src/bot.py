@@ -1200,6 +1200,34 @@ def _save_lineup_presets(presets: dict[str, list[int]]) -> None:
     )
 
 
+
+async def _safe_reply(interaction: discord.Interaction, content: str, *, ephemeral: bool = True) -> None:
+    """Odpowiedź na interakcję (response lub followup)."""
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content, ephemeral=ephemeral)
+    except Exception as e:
+        log("sklad", f"safe_reply: {e}")
+
+
+async def _disable_sklad_buttons(message: discord.Message | None) -> None:
+    if not message:
+        return
+    try:
+        view = discord.ui.View(timeout=None)
+        for child in (message.components or []):
+            pass
+        # prostsze: edycja z pustym view / disabled przez nowy view bez przycisków
+        await message.edit(view=None)
+    except Exception:
+        try:
+            await message.edit(view=discord.ui.View(timeout=None))
+        except Exception:
+            pass
+
+
 class SkladConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pindolz_sklad:(?P<mid>\d+):(?P<ans>yes|no)"):
     def __init__(self, mid: int, ans: str):
         if ans == "yes":
@@ -3227,6 +3255,56 @@ class PindolzBot(commands.Bot):
             db.set_config("active_lineup_mid", str(mid))
         log("sklad-rola", f"mid={mid} +{added} -{removed}")
         return added, removed
+
+
+    async def handle_sklad_confirm(self, interaction: discord.Interaction, mid: int, ans: str) -> None:
+        """Przycisk Gram / Nie mogę z DM składu."""
+        uid = interaction.user.id
+        if db.get_config(f"sklad_closed_{int(mid)}"):
+            await _safe_reply(interaction, "Mecz już się zakończył — potwierdzenia składu są zamknięte.")
+            await _disable_sklad_buttons(interaction.message)
+            return
+        roster = self._lineup_ids(mid)
+        if roster and uid not in roster:
+            await _safe_reply(interaction, "Nie jesteś na liście składu tego meczu.")
+            return
+        data = _lineup_confirms(int(mid))
+        data[str(uid)] = "yes" if ans == "yes" else "no"
+        _set_lineup_confirms(int(mid), data)
+        if ans == "yes":
+            await _safe_reply(interaction, "✅ Zaznaczono **Gram** – dzięki!")
+        else:
+            await _safe_reply(interaction, "❌ Zaznaczono **Nie mogę**. Kapitan dostanie info przy zbiórce.")
+        if ans == "no":
+            try:
+                cap = self.captain_id()
+                if cap:
+                    u = await self.fetch_user_safe(int(cap))
+                    if u:
+                        await u.send(f"❌ <@{uid}> **nie może** grać (mecz `#{mid}`).")
+            except Exception as e:
+                log("sklad", f"confirm DM kapitan: {e}")
+        if ans == "yes" and roster:
+            try:
+                data2 = _lineup_confirms(int(mid))
+                all_yes = all(data2.get(str(x)) == "yes" for x in roster)
+                flag = f"lineup_full_dm_{int(mid)}"
+                if all_yes and not db.get_config(flag):
+                    db.set_config(flag, "1")
+                    names = ", ".join(f"<@{x}>" for x in roster)
+                    text = f"✅ **Wszyscy ze składu potwierdzili Gram** (mecz `#{mid}`).\n{names}"
+                    for cid in (self.captain_id(), self.vice_captain_id()):
+                        if not cid:
+                            continue
+                        try:
+                            u = await self.fetch_user_safe(int(cid))
+                            if u:
+                                await u.send(text)
+                        except Exception:
+                            pass
+                    log("sklad", f"pełny skład Gram mid={mid}")
+            except Exception as e:
+                log("sklad", f"full confirm DM: {e}")
 
     async def clear_active_lineup_roles(self, guild: discord.Guild | None = None, mid: int | None = None) -> int:
         """Zdejmuje rolę aktywnego składu po meczu."""
