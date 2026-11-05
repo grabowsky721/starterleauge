@@ -63,7 +63,7 @@ LIVE_INTERVAL_ACTIVE = 5
 # Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
 # Soft-start: mecz → komendy@60s → tło → utrzymanie (~3 min)
 # Soft-start łącznie ~35 s od ready
-# Soft-start łącznie ~35 s od ready (bez sekwencyjnego ładowania komend)
+# Soft-start: LIVE pierwszy → … → tabela przedostatnia → status ostatni (~20 s)
 START_DELAY_LIVE = 2
 START_DELAY_PREMATCH = 4
 START_DELAY_DAILY = 6
@@ -275,6 +275,8 @@ def match_image_prompt(match: dict, kind: str = "preview") -> str:
         f"Epic esports CS2 match announcement poster, dark cyber arena, neon lights, "
         f"bold text '{t1} vs {t2}', coming soon, championship graphic, high quality, cinematic, no watermark"
     )
+
+
 
 
 
@@ -2000,14 +2002,16 @@ class PindolzBot(commands.Bot):
         ("prematch", "Przypomnienia"),
         ("daily", "Daily"),
         ("commands", "Komendy slash"),
-        ("table", "Tabela"),
-        ("status", "Status"),
         ("poll", "Ankiety"),
         ("api", "API watch"),
         ("event", "Eventy"),
         ("cleanup", "Cleanup"),
         ("update", "Update GitHub"),
+        ("scheduled", "Zaplanowane"),
+        ("aredl", "AREDL"),
         ("weekly", "Weekly"),
+        ("table", "Tabela"),
+        ("status", "Status"),
     )
 
     def _boot_progress_embed(self, done: set[str], current: str | None = None) -> discord.Embed:
@@ -2133,24 +2137,21 @@ class PindolzBot(commands.Bot):
             if not self.aredl_check.is_running():
                 self.aredl_check.start()
 
-        # Faza 1 – mecz
-        await run_step("live", START_DELAY_LIVE, start_live)
-        await run_step("prematch", START_DELAY_PREMATCH - START_DELAY_LIVE, start_prematch)
-        await run_step("daily", START_DELAY_DAILY - START_DELAY_PREMATCH, start_daily)
-        # Faza 2 – komendy
-        await run_step("commands", START_DELAY_COMMANDS - START_DELAY_DAILY, start_commands)
-        # Faza 3 – tło
-        await run_step("table", START_DELAY_TABLE - START_DELAY_COMMANDS, start_table)
-        await run_step("status", START_DELAY_STATUS - START_DELAY_TABLE, start_status)
-        await run_step("poll", START_DELAY_POLL - START_DELAY_STATUS, start_poll)
-        await run_step("api", START_DELAY_API - START_DELAY_POLL, start_api)
-        await run_step("event", START_DELAY_EVENT - START_DELAY_API, start_event)
-        # Faza 4 – utrzymanie
-        await run_step("cleanup", START_DELAY_CLEANUP - START_DELAY_EVENT, start_cleanup)
-        await run_step("update", START_DELAY_UPDATE - START_DELAY_CLEANUP, start_update)
+        # Soft-start: LIVE → mecz/API → tło → tabela → status (ostatni)
+        await run_step("live", 2, start_live)
+        await run_step("prematch", 2, start_prematch)
+        await run_step("daily", 2, start_daily)
+        await run_step("commands", 2, start_commands)
+        await run_step("poll", 1, start_poll)
+        await run_step("api", 1, start_api)
+        await run_step("event", 1, start_event)
+        await run_step("cleanup", 1, start_cleanup)
+        await run_step("update", 1, start_update)
         await run_step("scheduled", 0, start_scheduled)
         await run_step("aredl", 0, start_aredl)
-        await run_step("weekly", START_DELAY_WEEKLY - START_DELAY_UPDATE, start_weekly)
+        await run_step("weekly", 1, start_weekly)
+        await run_step("table", 1, start_table)
+        await run_step("status", 1, start_status)
 
         if not self.loop_watchdog.is_running():
             self.loop_watchdog.start()
