@@ -2005,11 +2005,11 @@ class PindolzBot(commands.Bot):
         ("poll", "Ankiety"),
         ("api", "API watch"),
         ("event", "Eventy"),
-        ("cleanup", "Cleanup"),
-        ("update", "Update GitHub"),
         ("scheduled", "Zaplanowane"),
         ("aredl", "AREDL"),
         ("weekly", "Weekly"),
+        ("cleanup", "Cleanup"),
+        ("update", "Update GitHub"),
         ("table", "Tabela"),
         ("status", "Status"),
     )
@@ -2137,19 +2137,19 @@ class PindolzBot(commands.Bot):
             if not self.aredl_check.is_running():
                 self.aredl_check.start()
 
-        # Soft-start: LIVE → mecz/API → tło → tabela → status (ostatni)
-        await run_step("live", 2, start_live)
+        # Soft-start: LIVE po 5s → … → cleanup → GitHub → tabela → status
+        await run_step("live", 5, start_live)
         await run_step("prematch", 2, start_prematch)
         await run_step("daily", 2, start_daily)
         await run_step("commands", 2, start_commands)
         await run_step("poll", 1, start_poll)
         await run_step("api", 1, start_api)
         await run_step("event", 1, start_event)
-        await run_step("cleanup", 1, start_cleanup)
-        await run_step("update", 1, start_update)
         await run_step("scheduled", 0, start_scheduled)
         await run_step("aredl", 0, start_aredl)
         await run_step("weekly", 1, start_weekly)
+        await run_step("cleanup", 1, start_cleanup)
+        await run_step("update", 1, start_update)
         await run_step("table", 1, start_table)
         await run_step("status", 1, start_status)
 
