@@ -2014,7 +2014,12 @@ class PindolzBot(commands.Bot):
         ("status", "Status"),
     )
 
-    def _boot_progress_embed(self, done: set[str], current: str | None = None) -> discord.Embed:
+    def _boot_progress_embed(
+        self,
+        done: set[str],
+        current: str | None = None,
+        elapsed_sec: float | None = None,
+    ) -> discord.Embed:
         lines = []
         for key, label in self.BOOT_LABELS:
             if key in done:
@@ -2033,20 +2038,39 @@ class PindolzBot(commands.Bot):
         )
         emb.set_footer(text="PV właściciela · zniknie za ~2 min")
         emb.title = f"🚀 Start bota ({done_n}/{total})"
-        emb.description = f"Wersja **`{BOT_VERSION}`** · soft-start w toku"
         if done_n >= total:
             emb.title = f"✅ Bot gotowy ({total}/{total})"
-            emb.description = f"Wersja **`{BOT_VERSION}`** · wszystko załadowane"
+            if elapsed_sec is not None:
+                sec = int(round(elapsed_sec))
+                emb.description = (
+                    f"Wersja **`{BOT_VERSION}`** · wszystko załadowane" + chr(10) + f"⏱ Soft-start: **{sec} s**"
+                )
+            else:
+                emb.description = f"Wersja **`{BOT_VERSION}`** · wszystko załadowane"
             emb.color = embeds.C_WIN if hasattr(embeds, "C_WIN") else emb.color
+        elif elapsed_sec is not None:
+            sec = int(round(elapsed_sec))
+            emb.description = (
+                f"Wersja **`{BOT_VERSION}`** · soft-start w toku · **{sec} s**"
+            )
+        else:
+            emb.description = f"Wersja **`{BOT_VERSION}`** · soft-start w toku"
         emb.add_field(name="Postęp ładowania", value="\n".join(lines), inline=False)
         return emb
 
-    async def _boot_set_progress(self, done: set[str], current: str | None = None):
+    async def _boot_set_progress(
+        self,
+        done: set[str],
+        current: str | None = None,
+        elapsed_sec: float | None = None,
+    ):
         msg = getattr(self, "_boot_msg", None)
         if not msg:
             return
         try:
-            await msg.edit(embed=self._boot_progress_embed(done, current))
+            await msg.edit(
+                embed=self._boot_progress_embed(done, current, elapsed_sec=elapsed_sec)
+            )
         except Exception as e:
             log("boot", f"{e}")
 
@@ -2055,10 +2079,12 @@ class PindolzBot(commands.Bot):
         """Mecz → sync komend → tło (łącznie ~35 s)."""
         await self.wait_until_ready()
         log("start", "soft-start (14× losowo 3–8 s)…")
+        t0 = datetime.now(TZ)
         done: set[str] = set()
 
         async def run_step(key: str, wait: float, action):
-            await self._boot_set_progress(done, current=key)
+            elapsed = (datetime.now(TZ) - t0).total_seconds()
+            await self._boot_set_progress(done, current=key, elapsed_sec=elapsed)
             # Zawsze losowa przerwa 3–8 s (parametr wait ignorowany – kompatybilność sygnatury)
             delay = random.randint(3, 8)
             await asyncio.sleep(delay)
@@ -2067,8 +2093,9 @@ class PindolzBot(commands.Bot):
             except Exception as e:
                 log("start", f"{key} błąd: {type(e).__name__}: {e}")
             done.add(key)
-            await self._boot_set_progress(done)
-            log("start", f"{key} (+{delay}s)")
+            elapsed = (datetime.now(TZ) - t0).total_seconds()
+            await self._boot_set_progress(done, elapsed_sec=elapsed)
+            log("start", f"{key} (+{delay}s, łącznie {int(elapsed)}s)")
 
         async def start_live():
             if not self.live_check.is_running():
@@ -2156,7 +2183,9 @@ class PindolzBot(commands.Bot):
 
         if not self.loop_watchdog.is_running():
             self.loop_watchdog.start()
-        log("start", "soft-start zakończony")
+        elapsed = (datetime.now(TZ) - t0).total_seconds()
+        await self._boot_set_progress(done, elapsed_sec=elapsed)
+        log("start", f"soft-start zakończony w {int(round(elapsed))} s")
         # upewnij się, że wiadomość startu zniknie max po 2 min od ready
         async def _ensure_boot_deleted():
             await asyncio.sleep(120)
