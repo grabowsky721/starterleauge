@@ -2054,20 +2054,21 @@ class PindolzBot(commands.Bot):
     async def _soft_start_tasks(self):
         """Mecz → sync komend → tło (łącznie ~35 s)."""
         await self.wait_until_ready()
-        log("start", "soft-start (~35 s)…")
+        log("start", "soft-start (14× losowo 3–8 s)…")
         done: set[str] = set()
 
         async def run_step(key: str, wait: float, action):
             await self._boot_set_progress(done, current=key)
-            if wait > 0:
-                await asyncio.sleep(wait)
+            # Zawsze losowa przerwa 3–8 s (parametr wait ignorowany – kompatybilność sygnatury)
+            delay = random.randint(3, 8)
+            await asyncio.sleep(delay)
             try:
                 await action()
             except Exception as e:
                 log("start", f"{key} błąd: {type(e).__name__}: {e}")
             done.add(key)
             await self._boot_set_progress(done)
-            log("start", key)
+            log("start", f"{key} (+{delay}s)")
 
         async def start_live():
             if not self.live_check.is_running():
