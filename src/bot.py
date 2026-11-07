@@ -2019,6 +2019,8 @@ class PindolzBot(commands.Bot):
         done: set[str],
         current: str | None = None,
         elapsed_sec: float | None = None,
+        min_sec: int | None = None,
+        max_sec: int | None = None,
     ) -> discord.Embed:
         lines = []
         for key, label in self.BOOT_LABELS:
@@ -2043,8 +2045,15 @@ class PindolzBot(commands.Bot):
             if elapsed_sec is not None:
                 sec = int(round(elapsed_sec))
                 emb.description = (
-                    f"Wersja **`{BOT_VERSION}`** · wszystko załadowane" + chr(10) + f"⏱ Soft-start: **{sec} s**"
+                    f"Wersja **`{BOT_VERSION}`** · wszystko załadowane"
+                    + chr(10)
+                    + f"⏱ Soft-start: **{sec} s**"
                 )
+                if min_sec is not None and max_sec is not None:
+                    emb.description += (
+                        chr(10)
+                        + f"⚡ Najkrótszy: **{min_sec} s** · 🐢 Najdłuższy: **{max_sec} s**"
+                    )
             else:
                 emb.description = f"Wersja **`{BOT_VERSION}`** · wszystko załadowane"
             emb.color = embeds.C_WIN if hasattr(embeds, "C_WIN") else emb.color
@@ -2063,13 +2072,17 @@ class PindolzBot(commands.Bot):
         done: set[str],
         current: str | None = None,
         elapsed_sec: float | None = None,
+        min_sec: int | None = None,
+        max_sec: int | None = None,
     ):
         msg = getattr(self, "_boot_msg", None)
         if not msg:
             return
         try:
             await msg.edit(
-                embed=self._boot_progress_embed(done, current, elapsed_sec=elapsed_sec)
+                embed=self._boot_progress_embed(
+                    done, current, elapsed_sec=elapsed_sec, min_sec=min_sec, max_sec=max_sec
+                )
             )
         except Exception as e:
             log("boot", f"{e}")
@@ -2184,8 +2197,66 @@ class PindolzBot(commands.Bot):
         if not self.loop_watchdog.is_running():
             self.loop_watchdog.start()
         elapsed = (datetime.now(TZ) - t0).total_seconds()
-        await self._boot_set_progress(done, elapsed_sec=elapsed)
-        log("start", f"soft-start zakończony w {int(round(elapsed))} s")
+        sec = int(round(elapsed))
+        min_sec = max_sec = sec
+        try:
+            raw_min = db.get_config("soft_start_min_sec")
+            raw_max = db.get_config("soft_start_max_sec")
+            if raw_min is not None and str(raw_min).strip() != "":
+                min_sec = min(int(raw_min), sec)
+            if raw_max is not None and str(raw_max).strip() != "":
+                max_sec = max(int(raw_max), sec)
+            db.set_config("soft_start_min_sec", str(min_sec))
+            db.set_config("soft_start_max_sec", str(max_sec))
+        except Exception as e:
+            log("start", f"soft_start stats: {e}")
+            min_sec = max_sec = sec
+        await self._boot_set_progress(
+            done, elapsed_sec=elapsed, min_sec=min_sec, max_sec=max_sec
+        )
+        log("start", f"soft-start zakończony w {sec} s (min={min_sec}, max={max_sec})")
+        # Osobne PV tylko przy nowym rekordzie min/max (nie przy 1. starcie obu naraz bez historii)
+        try:
+            prev_min = db.get_config("soft_start_prev_notified_min")
+            prev_max = db.get_config("soft_start_prev_notified_max")
+            is_new_min = str(min_sec) != str(prev_min) and min_sec == sec
+            is_new_max = str(max_sec) != str(prev_max) and max_sec == sec
+            # powiadom gdy ten start ustawił rekord (i nie jest to pierwszy zapis obu jako ten sam)
+            runs = int(db.get_config("soft_start_runs") or "0") + 1
+            db.set_config("soft_start_runs", str(runs))
+            if runs >= 2 and (is_new_min or is_new_max):
+                bits = []
+                if is_new_min:
+                    bits.append(f"⚡ **Nowy najkrótszy soft-start: {min_sec} s**")
+                if is_new_max:
+                    bits.append(f"🐢 **Nowy najdłuższy soft-start: {max_sec} s**")
+                bits.append(f"Ten start: **{sec} s** · rekordy: min **{min_sec} s** / max **{max_sec} s**")
+                text = "\n".join(bits)
+                text = chr(10).join(bits)
+                owner_ids = []
+                main_id = self._main_channel_id()
+                if main_id:
+                    ch = await self.get_channel_safe(main_id)
+                    g = getattr(ch, "guild", None) if ch else None
+                    if g and g.owner_id:
+                        owner_ids.append(int(g.owner_id))
+                for g in self.guilds:
+                    if g.owner_id and int(g.owner_id) not in owner_ids:
+                        owner_ids.append(int(g.owner_id))
+                for oid in owner_ids[:1]:
+                    try:
+                        u = self.get_user(oid) or await self.fetch_user(oid)
+                        await u.send(text)
+                        log("start", f"rekord soft-start PV → {oid}")
+                    except Exception as e:
+                        log("start", f"rekord PV: {e}")
+                db.set_config("soft_start_prev_notified_min", str(min_sec))
+                db.set_config("soft_start_prev_notified_max", str(max_sec))
+            elif runs == 1:
+                db.set_config("soft_start_prev_notified_min", str(min_sec))
+                db.set_config("soft_start_prev_notified_max", str(max_sec))
+        except Exception as e:
+            log("start", f"rekord notify: {e}")
         # upewnij się, że wiadomość startu zniknie max po 2 min od ready
         async def _ensure_boot_deleted():
             await asyncio.sleep(120)
