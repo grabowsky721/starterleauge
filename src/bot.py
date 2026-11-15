@@ -46,9 +46,6 @@ BOT_VERSION = load_version()
 GITHUB_REPO = "grabowsky721/starterleauge"
 GITHUB_BRANCH = "main"
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-CF_ACCOUNT_ID = (os.getenv("CLOUDFLARE_ACCOUNT_ID") or "").strip()
-CF_API_TOKEN = (os.getenv("CLOUDFLARE_API_TOKEN") or "").strip()
-CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 TZ = ZoneInfo("Europe/Warsaw")
 
 TABLE_UPDATE_TIMES = [
@@ -99,6 +96,8 @@ COMMAND_START_ORDER = [
     "tabela",
     "nadchodzace",
     "wyniki",
+    "mvp",
+    "mvp-czas",
     "pindolz",
     "live",
     "ustawienia",
@@ -211,70 +210,6 @@ FEATURES = {
 def feature_on(name: str) -> bool:
     return db.get_config(f"feat_{name}") != "0"
 
-
-def cf_image_enabled() -> bool:
-    return bool(CF_ACCOUNT_ID and CF_API_TOKEN)
-
-
-def generate_cf_image(prompt: str, steps: int = 4) -> bytes | None:
-    """Cloudflare Workers AI FLUX – zwraca JPEG bytes albo None."""
-    if not cf_image_enabled():
-        return None
-    url = (
-        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
-        f"/ai/run/{CF_IMAGE_MODEL}"
-    )
-    try:
-        r = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {CF_API_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            json={"prompt": (prompt or "")[:2000], "steps": int(steps)},
-            timeout=90,
-        )
-        if r.status_code >= 400:
-            log("cf-image", f"HTTP {r.status_code}: {r.text[:240]}")
-            return None
-        try:
-            data = r.json()
-        except Exception:
-            log("cf-image", "odpowiedź nie jest JSON")
-            return None
-        if not isinstance(data, dict):
-            return None
-        img_b64 = (data.get("result") or {}).get("image") or data.get("image")
-        if not img_b64:
-            log("cf-image", f"brak image w odpowiedzi: {str(data)[:200]}")
-            return None
-        return base64.b64decode(img_b64)
-    except Exception as e:
-        log("cf-image", str(e))
-        return None
-
-
-def match_image_prompt(match: dict, kind: str = "preview") -> str:
-    """Prompt do grafiki meczowej (esport CS2)."""
-    try:
-        t1 = embeds._team_name(match, "team1")
-        t2 = embeds._team_name(match, "team2")
-    except Exception:
-        t1, t2 = "PINDOLZ", "Opponent"
-    if kind == "result":
-        try:
-            score = embeds._score_str(match)
-        except Exception:
-            s = match.get("score") or {}
-            score = f"{s.get('team1', '?')}:{s.get('team2', '?')}"
-        return (
-            f"Epic esports CS2 match result poster, dark cyber arena, neon orange and blue lights, "
-            f"bold text '{t1} {score} {t2}', championship graphic, high quality, cinematic, no watermark"
-        )
-    return (
-        f"Epic esports CS2 match announcement poster, dark cyber arena, neon lights, "
-        f"bold text '{t1} vs {t2}', coming soon, championship graphic, high quality, cinematic, no watermark"
-    )
 
 
 
@@ -405,6 +340,62 @@ def _next_sched_id() -> int:
 
 def _mvp_key(mid: int) -> str:
     return f"mvp_votes_{mid}"
+
+def mvp_duration_hours() -> int:
+    """Długość ankiety MVP w godzinach (1–168, domyślnie 24)."""
+    h = db.get_config_int("mvp_duration_hours")
+    if not h or h < 1:
+        return 24
+    return min(int(h), 168)
+
+def mvp_duration_seconds() -> int:
+    return mvp_duration_hours() * 3600
+
+
+def _mvp_status_embed(mid: int, data: dict, opponent: str | None = None) -> discord.Embed:
+    players = data.get("players") or []
+    votes = data.get("votes") or {}
+    closed = bool(data.get("closed"))
+    counts = [0] * len(players)
+    for v in votes.values():
+        try:
+            vi = int(v)
+            if 0 <= vi < len(counts):
+                counts[vi] += 1
+        except Exception:
+            pass
+    title = "⭐ MVP meczu" if closed else "⭐ MVP meczu – głosowanie"
+    opp = opponent or "?"
+    status = "zakończone" if closed else "otwarte"
+    emb = discord.Embed(
+        title=title,
+        description=f"Mecz `#{mid}` · vs **{opp}**\nGłosów: **{len(votes)}** · **{status}**",
+        color=0xF1C40F,
+    )
+    # fix description newlines
+    emb.description = (
+        f"Mecz `#{mid}` · vs **{opp}**"
+        + chr(10)
+        + f"Głosów: **{len(votes)}** · **{status}**"
+    )
+    if not players:
+        emb.add_field(name="—", value="Brak kandydatów.", inline=False)
+        return emb
+    order = list(range(len(players)))
+    if closed:
+        order.sort(key=lambda i: (-counts[i], i))
+    for rank, i in enumerate(order):
+        pl = players[i]
+        nick = pl.get("nick") or "?"
+        uid = pl.get("id")
+        medal = "🏆 " if closed and rank == 0 and counts[i] > 0 else ""
+        emb.add_field(
+            name=f"{medal}{nick} ({counts[i]})",
+            value=f"<@{uid}>" if uid else "—",
+            inline=True,
+        )
+    return emb
+
 
 
 
@@ -2576,16 +2567,6 @@ class PindolzBot(commands.Bot):
             msg_id, ch_id = await self._edit_or_send(channel, embeds.result_embed(m, form=form, standing=standing), None, None, view=gg_view(mid))
             await self._react_result(ch_id, msg_id, m)
             await self._post_win_gif(ch_id, m)
-            try:
-                live_ch = await self.get_channel_safe(self._live_channel_id())
-                await self.send_match_image(
-                    live_ch or channel,
-                    m,
-                    kind="result",
-                    content="🏁 **Wynik meczu**",
-                )
-            except Exception as e:
-                log("cf-image", f"result daily: {e}")
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=self._opponent(m), status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=m.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat(), notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
             await self._start_mvp_vote(channel, m)
             try:
@@ -2630,17 +2611,6 @@ class PindolzBot(commands.Bot):
                     db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
                 continue
             msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid))
-            try:
-                if not db.get_config(f"preview_img_{mid}"):
-                    await self.send_match_image(
-                        channel,
-                        m,
-                        kind="preview",
-                        content="🗓️ **Nadchodzący mecz**",
-                    )
-                    db.set_config(f"preview_img_{mid}", "1")
-            except Exception as e:
-                log("cf-image", f"preview: {e}")
             db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, status="scheduled", notified_upcoming=1, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
 
     PREMATCH_MINUTES = 30
@@ -2850,15 +2820,6 @@ class PindolzBot(commands.Bot):
                         msg_id, ch_id = await self._edit_or_send(main_ch, embeds.result_embed(match_data, form=form, standing=standing), None, None, view=gg_view(mid))
                         await self._react_result(ch_id, msg_id, match_data)
                         await self._post_win_gif(ch_id, match_data)
-                        try:
-                            await self.send_match_image(
-                                main_ch,
-                                match_data,
-                                kind="result",
-                                content="🏁 **Wynik meczu**",
-                            )
-                        except Exception as e:
-                            log("cf-image", f"result live: {e}")
                         db.upsert_match(mid, notified_result=1, msg_result_id=msg_id, msg_result_ch=ch_id)
                 db.upsert_match(mid, status="finished", score_team1=score.get("team1"), score_team2=score.get("team2"), winner_team_id=match_data.get("winnerTeamId"), finished_at=datetime.utcnow().isoformat())
             else:
@@ -2899,7 +2860,7 @@ class PindolzBot(commands.Bot):
         db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
         emb = discord.Embed(
             title="⭐ MVP meczu – głosowanie",
-            description=f"PINDOLZ vs **{self._opponent(match)}**\nWybierz 1 z {len(players)} (głosujesz raz).",
+            description=f"PINDOLZ vs **{self._opponent(match)}**\nWybierz 1 z {len(players)} (głosujesz raz). Czas: **{mvp_duration_hours()} h**.",
             color=0xF1C40F,
         )
         for i, (uid, nick) in enumerate(players):
@@ -2912,7 +2873,7 @@ class PindolzBot(commands.Bot):
             data["message_id"] = msg.id
             data["channel_id"] = channel.id
             db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
-            asyncio.create_task(self._close_mvp_later(int(mid), 30 * 60))
+            asyncio.create_task(self._close_mvp_later(int(mid), mvp_duration_seconds()))
         except Exception as e:
             print(f"[mvp] start: {e}")
 
@@ -3980,27 +3941,6 @@ class PindolzBot(commands.Bot):
             print(f"[gif] send error: {e}")
 
 
-    async def send_match_image(
-        self,
-        channel: discord.abc.Messageable | None,
-        match: dict,
-        kind: str = "preview",
-        content: str | None = None,
-    ) -> None:
-        """Generuje grafikę Cloudflare Workers AI i wysyła na kanał."""
-        if not channel or not cf_image_enabled():
-            return
-        try:
-            prompt = match_image_prompt(match, kind)
-            data = await asyncio.to_thread(generate_cf_image, prompt, 4)
-            if not data:
-                return
-            fname = "preview.jpg" if kind == "preview" else "result.jpg"
-            f = discord.File(io.BytesIO(data), filename=fname)
-            await channel.send(content=content, file=f)
-            log("cf-image", f"wysłano {kind} mid={match.get('id')}")
-        except Exception as e:
-            log("cf-image", f"send: {e}")
 
     async def _post_win_gif(self, ch_id, match: dict):
         """Alias wsteczny – wywołuje uniwersalny post (win lub loss)."""
@@ -4236,6 +4176,244 @@ class PindolzBot(commands.Bot):
 bot = PindolzBot()
 
 
+
+# ---------- UI: hub i odświeżanie ----------
+class PindolzHubView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.primary, emoji="🔄", row=0)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            upcoming = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+            history = await asyncio.to_thread(bot.api.get_pindolz_history)
+            await interaction.edit_original_response(
+                embeds=[embeds.upcoming_embed(upcoming), embeds.history_embed(history)],
+                view=self,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Błąd: {e}", ephemeral=True)
+
+    @discord.ui.select(
+        placeholder="Szybkie menu…",
+        min_values=1,
+        max_values=1,
+        row=1,
+        options=[
+            discord.SelectOption(label="Nadchodzące", value="up", emoji="📅"),
+            discord.SelectOption(label="Wyniki", value="hist", emoji="📊"),
+            discord.SelectOption(label="Tabela", value="table", emoji="🏆"),
+            discord.SelectOption(label="LIVE", value="live", emoji="🔴"),
+            discord.SelectOption(label="MVP", value="mvp", emoji="⭐"),
+            discord.SelectOption(label="AREDL klan", value="aredl", emoji="🎮"),
+            discord.SelectOption(label="AREDL top", value="aredl_top", emoji="🥇"),
+            discord.SelectOption(label="Status bota", value="status", emoji="🟢"),
+        ],
+    )
+    async def menu(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await interaction.response.defer(ephemeral=True)
+        v = select.values[0]
+        try:
+            if v == "up":
+                data = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+                await interaction.followup.send(embed=embeds.upcoming_embed(data), ephemeral=True)
+            elif v == "hist":
+                data = await asyncio.to_thread(bot.api.get_pindolz_history)
+                await interaction.followup.send(embed=embeds.history_embed(data), ephemeral=True)
+            elif v == "table":
+                data = await asyncio.to_thread(bot.api.get_division6_table)
+                await interaction.followup.send(
+                    embed=embeds.standings_embed(data, changes=bot._rank_changes(data)),
+                    ephemeral=True,
+                )
+            elif v == "live":
+                lives = await asyncio.to_thread(bot.api.get_pindolz_live)
+                if not lives:
+                    await interaction.followup.send("Aktualnie PINDOLZ nie gra.", ephemeral=True)
+                else:
+                    await interaction.followup.send(
+                        embeds=[embeds.live_embed(m) for m in lives[:5]],
+                        ephemeral=True,
+                    )
+            elif v == "mvp":
+                # reuse last mvp
+                history = await asyncio.to_thread(bot.api.get_pindolz_history)
+                found = None
+                for m in history or []:
+                    try:
+                        cand = int(m.get("id"))
+                        d = json.loads(db.get_config(_mvp_key(cand)) or "{}")
+                    except Exception:
+                        continue
+                    if d and d.get("players"):
+                        found = (cand, d, m)
+                        break
+                if not found:
+                    await interaction.followup.send("Brak głosowań MVP.", ephemeral=True)
+                else:
+                    mid, data, m = found
+                    await interaction.followup.send(
+                        embed=_mvp_status_embed(mid, data, bot._opponent(m)),
+                        ephemeral=True,
+                    )
+            elif v == "aredl":
+                data = await asyncio.to_thread(_aredl_clan)
+                if not data:
+                    await interaction.followup.send("AREDL niedostępne.", ephemeral=True)
+                else:
+                    await interaction.followup.send(embed=_aredl_clan_embed(data), ephemeral=True)
+            elif v == "aredl_top":
+                data = await asyncio.to_thread(_aredl_clan)
+                if not data:
+                    await interaction.followup.send("AREDL niedostępne.", ephemeral=True)
+                    return
+                clan = data.get("clan") or {}
+                tag = clan.get("tag") or "Pdlz"
+                name = clan.get("global_name") or "Pindolz"
+                members = data.get("members_points") or []
+                emb = embeds._base(f"🏆 [{tag}] {name} · ranking", embeds.C_INFO)
+                if not members:
+                    emb.description = "Brak danych członków."
+                else:
+                    def _pts(mm):
+                        try:
+                            return float(mm.get("total_points") or mm.get("points") or 0)
+                        except Exception:
+                            return 0.0
+                    members = sorted(members, key=_pts, reverse=True)
+                    lines = []
+                    for i, mm in enumerate(members[:15], 1):
+                        u = mm.get("user") or mm
+                        un = u.get("global_name") or u.get("username") or "?"
+                        pts = mm.get("total_points") if mm.get("total_points") is not None else mm.get("points")
+                        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i}.`")
+                        lines.append(f"{medal} **{un}** — {pts if pts is not None else '—'} pkt")
+                    emb.description = "\n".join(lines)[:4000]
+                await interaction.followup.send(embed=emb, ephemeral=True)
+            elif v == "status":
+                await interaction.followup.send(embed=await _build_status_embed(), ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Błąd: {e}", ephemeral=True)
+
+
+class UpcomingRefreshView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            data = await asyncio.to_thread(bot.api.get_pindolz_upcoming)
+            await interaction.edit_original_response(embed=embeds.upcoming_embed(data), view=self)
+        except Exception as e:
+            await interaction.followup.send(f"Błąd: {e}", ephemeral=True)
+
+
+class StatusRefreshView(discord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            emb = await _build_status_embed()
+            await interaction.edit_original_response(embed=emb, view=self)
+        except Exception as e:
+            await interaction.followup.send(f"Błąd: {e}", ephemeral=True)
+
+
+class AredlRefreshView(discord.ui.View):
+    def __init__(self, kind: str = "clan", nick: str | None = None):
+        super().__init__(timeout=180)
+        self.kind = kind
+        self.nick = nick
+
+    @discord.ui.button(label="Odśwież", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            if self.kind == "player" and self.nick:
+                data = await asyncio.to_thread(_aredl_profile, self.nick)
+                if not data:
+                    await interaction.followup.send("Nie znaleziono gracza.", ephemeral=True)
+                    return
+                await interaction.edit_original_response(
+                    embed=_aredl_player_embed(data), view=self
+                )
+            elif self.kind == "top":
+                data = await asyncio.to_thread(_aredl_clan)
+                if not data:
+                    await interaction.followup.send("AREDL niedostępne.", ephemeral=True)
+                    return
+                clan = data.get("clan") or {}
+                tag = clan.get("tag") or "Pdlz"
+                name = clan.get("global_name") or "Pindolz"
+                members = data.get("members_points") or []
+                emb = embeds._base(f"🏆 [{tag}] {name} · ranking", embeds.C_INFO)
+                if not members:
+                    emb.description = "Brak danych członków."
+                else:
+                    def _pts(mm):
+                        try:
+                            return float(mm.get("total_points") or mm.get("points") or 0)
+                        except Exception:
+                            return 0.0
+                    members = sorted(members, key=_pts, reverse=True)
+                    lines = []
+                    for i, mm in enumerate(members[:15], 1):
+                        u = mm.get("user") or mm
+                        un = u.get("global_name") or u.get("username") or "?"
+                        pts = mm.get("total_points") if mm.get("total_points") is not None else mm.get("points")
+                        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i}.`")
+                        lines.append(f"{medal} **{un}** — {pts if pts is not None else '—'} pkt")
+                    emb.description = "\n".join(lines)[:4000]
+                await interaction.edit_original_response(embed=emb, view=self)
+            else:
+                data = await asyncio.to_thread(_aredl_clan)
+                if not data:
+                    await interaction.followup.send("AREDL niedostępne.", ephemeral=True)
+                    return
+                await interaction.edit_original_response(
+                    embed=_aredl_clan_embed(data), view=self
+                )
+        except Exception as e:
+            await interaction.followup.send(f"Błąd: {e}", ephemeral=True)
+
+
+async def _build_status_embed() -> discord.Embed:
+    api_ok, api_detail = "❌", "błąd"
+    try:
+        lives = await asyncio.to_thread(bot.api.get_pindolz_live)
+        api_ok, api_detail = "✅", f"OK · live: {len(lives)}"
+    except Exception as e:
+        api_detail = str(e)[:120]
+    main_id, live_id, table_id = bot._main_channel_id(), bot._live_channel_id(), bot._table_channel_id()
+
+    def ch_line(label, cid):
+        return f"{label}: **nie ustawiony**" if not cid else f"{label}: <#{cid}>"
+
+    uptime = datetime.now(TZ) - bot.started_at
+    h, rem = divmod(int(uptime.total_seconds()), 3600)
+    m, s = divmod(rem, 60)
+    up = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
+    emb = discord.Embed(title="Status bota PINDOLZ", color=0x3B82F6, timestamp=datetime.now(TZ))
+    emb.add_field(name="Wersja", value=f"`{BOT_VERSION}`", inline=True)
+    emb.add_field(name="Uptime", value=up, inline=True)
+    emb.add_field(name="LIVE task", value="✅" if bot.live_check.is_running() else "❌", inline=True)
+    emb.add_field(name="API StarterLeague", value=f"{api_ok} {api_detail}", inline=False)
+    emb.add_field(
+        name="Kanały",
+        value="\n".join([ch_line("Główny", main_id), ch_line("LIVE", live_id), ch_line("Tabela", table_id)]),
+        inline=False,
+    )
+    emb.add_field(name="MVP (czas ankiety)", value=f"**{mvp_duration_hours()} h**", inline=True)
+    return emb
+
+
 @bot.tree.command(name="pindolz", description="Najbliższe i ostatnie mecze PINDOLZ")
 async def cmd_pindolz(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -4245,7 +4423,10 @@ async def cmd_pindolz(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"Błąd API: {e}")
         return
-    await interaction.followup.send(embeds=[embeds.upcoming_embed(upcoming), embeds.history_embed(history)])
+    await interaction.followup.send(
+        embeds=[embeds.upcoming_embed(upcoming), embeds.history_embed(history)],
+        view=PindolzHubView(),
+    )
 
 
 @bot.tree.command(name="live", description="Czy PINDOLZ gra teraz?")
@@ -4260,6 +4441,126 @@ async def cmd_live(interaction: discord.Interaction):
         await interaction.followup.send("Aktualnie PINDOLZ nie gra.")
         return
     await interaction.followup.send(embeds=[embeds.live_embed(m) for m in lives])
+
+
+
+
+
+
+@bot.tree.command(name="mvp-czas", description="Ustaw długość ankiety MVP w godzinach (sztab)")
+@app_commands.describe(godziny="1–168 godzin (domyślnie 24)")
+async def cmd_mvp_czas(interaction: discord.Interaction, godziny: app_commands.Range[int, 1, 168]):
+    if not bot.is_staff(interaction):
+        await interaction.response.send_message("Tylko sztab.", ephemeral=True)
+        return
+    db.set_config("mvp_duration_hours", str(int(godziny)))
+    await interaction.response.send_message(
+        f"✅ Ankieta MVP będzie trwać **{int(godziny)} h** (od kolejnych głosowań).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="mvp", description="MVP meczu – wynik głosowania lub status")
+@app_commands.describe(
+    mecz="ID meczu (puste = ostatni z głosowaniem MVP)",
+    zamknij="Zamknij otwarte głosowanie (sztab)",
+)
+async def cmd_mvp(
+    interaction: discord.Interaction,
+    mecz: Optional[int] = None,
+    zamknij: bool = False,
+):
+    await interaction.response.defer(ephemeral=False)
+    mid = mecz
+    data: dict = {}
+    match_obj = None
+
+    if mid is not None:
+        try:
+            data = json.loads(db.get_config(_mvp_key(int(mid))) or "{}")
+        except Exception:
+            data = {}
+        if not data or not data.get("players"):
+            await interaction.followup.send(
+                f"Brak głosowania MVP dla meczu `#{mid}`.",
+                ephemeral=True,
+            )
+            return
+    else:
+        try:
+            history = await asyncio.to_thread(bot.api.get_pindolz_history)
+        except Exception:
+            history = []
+        found_mid = None
+        for m in history or []:
+            try:
+                cand = int(m.get("id"))
+            except Exception:
+                continue
+            try:
+                d = json.loads(db.get_config(_mvp_key(cand)) or "{}")
+            except Exception:
+                d = {}
+            if d and d.get("players"):
+                found_mid, data, match_obj = cand, d, m
+                break
+        if found_mid is None:
+            await interaction.followup.send(
+                "Brak zapisanych głosowań MVP. Pojawi się automatycznie po meczu (ze składem).",
+                ephemeral=True,
+            )
+            return
+        mid = found_mid
+
+    opp = None
+    try:
+        if match_obj is None:
+            history = await asyncio.to_thread(bot.api.get_pindolz_history)
+            for h in history or []:
+                if h.get("id") == int(mid):
+                    match_obj = h
+                    break
+        if match_obj:
+            opp = bot._opponent(match_obj)
+        else:
+            row = db.get_match(int(mid))
+            if row:
+                opp = row.get("opponent")
+    except Exception:
+        pass
+
+    if zamknij:
+        if not bot.is_staff(interaction):
+            await interaction.followup.send(
+                "Tylko sztab może zamknąć głosowanie.", ephemeral=True
+            )
+            return
+        if data.get("closed"):
+            await interaction.followup.send("Głosowanie już zamknięte.", ephemeral=True)
+            return
+        await bot._close_mvp(int(mid))
+        try:
+            data = json.loads(db.get_config(_mvp_key(int(mid))) or "{}")
+        except Exception:
+            pass
+        await interaction.followup.send(embed=_mvp_status_embed(int(mid), data, opp))
+        return
+
+    emb = _mvp_status_embed(int(mid), data, opp)
+    if not data.get("closed"):
+        players = data.get("players") or []
+        view = discord.ui.View(timeout=None)
+        for i, pl in enumerate(players[:5]):
+            view.add_item(
+                MvpButton(
+                    int(mid),
+                    i,
+                    label=f"{i+1}. {str(pl.get('nick') or '?')[:60]}",
+                )
+            )
+        await interaction.followup.send(embed=emb, view=view)
+    else:
+        await interaction.followup.send(embed=emb)
 
 
 @bot.tree.command(name="wyniki", description="Ostatnie wyniki PINDOLZ")
@@ -4281,7 +4582,7 @@ async def cmd_nadchodzace(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"Błąd API: {e}")
         return
-    await interaction.followup.send(embed=embeds.upcoming_embed(upcoming))
+    await interaction.followup.send(embed=embeds.upcoming_embed(upcoming), view=UpcomingRefreshView())
 
 
 @bot.tree.command(name="tabela", description="Tabela dywizji PINDOLZ")
@@ -4419,7 +4720,8 @@ async def cmd_status(interaction: discord.Interaction):
     emb.add_field(name="LIVE task", value="✅" if bot.live_check.is_running() else "❌", inline=True)
     emb.add_field(name="API StarterLeague", value=f"{api_ok} {api_detail}", inline=False)
     emb.add_field(name="Kanały", value="\n".join([ch_line("Główny", main_id), ch_line("LIVE", live_id), ch_line("Tabela", table_id)]), inline=False)
-    await interaction.followup.send(embed=emb, ephemeral=True)
+    emb.add_field(name="MVP (czas ankiety)", value=f"**{mvp_duration_hours()} h**", inline=True)
+    await interaction.followup.send(embed=emb, view=StatusRefreshView(), ephemeral=True)
 
 
 @bot.tree.command(name="setup-all", description="Panel ustawiania kanałów (interfejs; właściciel)")
@@ -4627,7 +4929,10 @@ async def cmd_aredl(interaction: discord.Interaction, nick: str | None = None):
                     ephemeral=True,
                 )
                 return
-            await interaction.followup.send(embed=_aredl_player_embed(data))
+            await interaction.followup.send(
+                embed=_aredl_player_embed(data),
+                view=AredlRefreshView(kind="player", nick=nick.strip()),
+            )
             return
         data = await asyncio.to_thread(_aredl_clan)
         if not data:
@@ -4636,7 +4941,10 @@ async def cmd_aredl(interaction: discord.Interaction, nick: str | None = None):
                 ephemeral=True,
             )
             return
-        await interaction.followup.send(embed=_aredl_clan_embed(data))
+        await interaction.followup.send(
+            embed=_aredl_clan_embed(data),
+            view=AredlRefreshView(kind="clan"),
+        )
     except Exception as e:
         log("aredl", f"cmd: {e}")
         await interaction.followup.send(f"Błąd AREDL: `{type(e).__name__}`", ephemeral=True)
@@ -4663,7 +4971,7 @@ async def cmd_aredl_top(interaction: discord.Interaction):
                 "(klan nowy albo nikt nie ma jeszcze recordów)."
             )
             emb.add_field(name="Profil", value=f"[aredl.net]({AREDL_CLAN_URL})", inline=False)
-            await interaction.followup.send(embed=emb)
+            await interaction.followup.send(embed=emb, view=AredlRefreshView(kind="top"))
             return
         # sort by points desc
         def _pts(m):
@@ -4681,7 +4989,7 @@ async def cmd_aredl_top(interaction: discord.Interaction):
             lines.append(f"{medal} **{un}** — {pts if pts is not None else '—'} pkt")
         emb.description = "\n".join(lines)[:4000]
         emb.add_field(name="Profil klanu", value=f"[aredl.net]({AREDL_CLAN_URL})", inline=False)
-        await interaction.followup.send(embed=emb)
+        await interaction.followup.send(embed=emb, view=AredlRefreshView(kind="top"))
     except Exception as e:
         log("aredl", f"top: {e}")
         await interaction.followup.send(f"Błąd: `{type(e).__name__}`", ephemeral=True)
