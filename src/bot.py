@@ -2827,30 +2827,46 @@ class PindolzBot(commands.Bot):
                 await self._finish_event(mid)
                 db.mark_finished(mid)
 
-    async def _start_mvp_vote(self, channel, match: dict):
-        """Po meczu: głosowanie MVP – do 5 osób ze składu / powiązań."""
+    async def _start_mvp_vote(
+        self,
+        channel,
+        match: dict,
+        players_override: list[tuple[int, str]] | None = None,
+        force: bool = False,
+    ) -> bool:
+        """Głosowanie MVP – skład / powiązania albo ręczna lista graczy (max 5)."""
         mid = match.get("id")
         if mid is None or not channel:
-            return
-        if db.get_config(_mvp_key(mid)):
-            return  # już było
+            return False
+        if db.get_config(_mvp_key(mid)) and not force:
+            return False
         players: list[tuple[int, str]] = []
-        try:
-            ids = [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
-        except Exception:
-            ids = []
-        nicks = _player_nicks()
-        for uid in ids[:5]:
-            players.append((uid, nicks.get(uid) or f"Gracz"))
-        if len(players) < 2:
-            # uzupełnij z powiązań
-            for uid, nick in list(nicks.items()):
-                if uid not in {p[0] for p in players}:
-                    players.append((uid, nick))
+        if players_override:
+            seen: set[int] = set()
+            for uid, nick in players_override:
+                uid = int(uid)
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                players.append((uid, (nick or "Gracz")[:80]))
                 if len(players) >= 5:
                     break
+        else:
+            try:
+                ids = [int(x) for x in json.loads(db.get_config(f"lineup_{mid}") or "[]")]
+            except Exception:
+                ids = []
+            nicks = _player_nicks()
+            for uid in ids[:5]:
+                players.append((uid, nicks.get(uid) or "Gracz"))
+            if len(players) < 2:
+                for uid, nick in list(nicks.items()):
+                    if uid not in {p[0] for p in players}:
+                        players.append((uid, nick))
+                    if len(players) >= 5:
+                        break
         if len(players) < 2:
-            return
+            return False
         players = players[:5]
         data = {
             "players": [{"id": u, "nick": n} for u, n in players],
@@ -2858,10 +2874,11 @@ class PindolzBot(commands.Bot):
             "closed": False,
         }
         db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
-        emb = discord.Embed(
-            title="⭐ MVP meczu – głosowanie",
-            description=f"PINDOLZ vs **{self._opponent(match)}**\nWybierz 1 z {len(players)} (głosujesz raz). Czas: **{mvp_duration_hours()} h**.",
-            color=0xF1C40F,
+        emb = discord.Embed(title="⭐ MVP meczu – głosowanie", color=0xF1C40F)
+        emb.description = (
+            f"PINDOLZ vs **{self._opponent(match)}**"
+            + chr(10)
+            + f"Wybierz 1 z {len(players)} (głosujesz raz). Czas: **{mvp_duration_hours()} h**."
         )
         for i, (uid, nick) in enumerate(players):
             emb.add_field(name=f"{i+1}. {nick}", value=f"<@{uid}>", inline=True)
@@ -2874,8 +2891,10 @@ class PindolzBot(commands.Bot):
             data["channel_id"] = channel.id
             db.set_config(_mvp_key(mid), json.dumps(data, ensure_ascii=False))
             asyncio.create_task(self._close_mvp_later(int(mid), mvp_duration_seconds()))
+            return True
         except Exception as e:
             print(f"[mvp] start: {e}")
+            return False
 
     async def _handle_mvp_vote(self, interaction: discord.Interaction, mid: int, idx: int):
         try:
@@ -4460,21 +4479,112 @@ async def cmd_mvp_czas(interaction: discord.Interaction, godziny: app_commands.R
     )
 
 
-@bot.tree.command(name="mvp", description="MVP meczu – wynik głosowania lub status")
+@bot.tree.command(name="mvp", description="MVP meczu – wynik, start głosowania, gracze")
 @app_commands.describe(
-    mecz="ID meczu (puste = ostatni z głosowaniem MVP)",
+    mecz="ID meczu (puste = ostatni z historii / z głosowaniem)",
+    start="Uruchom głosowanie (sztab) – z graczami lub ze składu",
     zamknij="Zamknij otwarte głosowanie (sztab)",
+    gracz1="Kandydat MVP 1",
+    gracz2="Kandydat MVP 2",
+    gracz3="Kandydat MVP 3",
+    gracz4="Kandydat MVP 4",
+    gracz5="Kandydat MVP 5",
 )
 async def cmd_mvp(
     interaction: discord.Interaction,
     mecz: Optional[int] = None,
+    start: bool = False,
     zamknij: bool = False,
+    gracz1: Optional[discord.Member] = None,
+    gracz2: Optional[discord.Member] = None,
+    gracz3: Optional[discord.Member] = None,
+    gracz4: Optional[discord.Member] = None,
+    gracz5: Optional[discord.Member] = None,
 ):
     await interaction.response.defer(ephemeral=False)
     mid = mecz
     data: dict = {}
     match_obj = None
+    nicks = _player_nicks()
 
+    # Zbierz ręcznych graczy
+    manual: list[tuple[int, str]] = []
+    for mem in (gracz1, gracz2, gracz3, gracz4, gracz5):
+        if mem is None:
+            continue
+        nick = nicks.get(mem.id) or mem.display_name
+        manual.append((mem.id, nick))
+
+    # START głosowania
+    if start:
+        if not bot.is_staff(interaction):
+            await interaction.followup.send("Tylko sztab może startować MVP.", ephemeral=True)
+            return
+        if mid is None:
+            try:
+                history = await asyncio.to_thread(bot.api.get_pindolz_history)
+            except Exception:
+                history = []
+            if history:
+                mid = history[0].get("id")
+                match_obj = history[0]
+            if mid is None:
+                await interaction.followup.send(
+                    "Podaj `mecz:` (ID) – brak historii meczów.",
+                    ephemeral=True,
+                )
+                return
+        if match_obj is None:
+            try:
+                history = await asyncio.to_thread(bot.api.get_pindolz_history)
+            except Exception:
+                history = []
+            for h in history or []:
+                if h.get("id") == int(mid):
+                    match_obj = h
+                    break
+        if match_obj is None:
+            match_obj = {"id": int(mid), "team1": {"name": "PINDOLZ"}, "team2": {"name": "?"}}
+            row = db.get_match(int(mid))
+            if row and row.get("opponent"):
+                match_obj["team2"] = {"name": row["opponent"]}
+
+        channel = interaction.channel
+        if channel is None or not hasattr(channel, "send"):
+            ch_id = bot._main_channel_id()
+            channel = await bot.get_channel_safe(ch_id) if ch_id else None
+        if not channel:
+            await interaction.followup.send("Brak kanału do wysłania ankiety.", ephemeral=True)
+            return
+
+        if manual and len(manual) < 2:
+            await interaction.followup.send(
+                "Podaj **min. 2** graczy (`gracz1`…`gracz5`) albo zostaw puste = skład meczu.",
+                ephemeral=True,
+            )
+            return
+
+        ok = await bot._start_mvp_vote(
+            channel,
+            match_obj,
+            players_override=manual or None,
+            force=True,
+        )
+        if not ok:
+            await interaction.followup.send(
+                "Nie udało się uruchomić MVP (za mało graczy w składzie / powiązaniach?). "
+                "Podaj min. 2 osoby w `gracz1`…",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"✅ Głosowanie MVP dla meczu `#{mid}` uruchomione"
+            + (" (ręczni gracze)." if manual else " (skład / powiązania)."),
+            ephemeral=True,
+        )
+        return
+
+    # --- podgląd / zamknij (jak wcześniej) ---
     if mid is not None:
         try:
             data = json.loads(db.get_config(_mvp_key(int(mid))) or "{}")
@@ -4482,7 +4592,8 @@ async def cmd_mvp(
             data = {}
         if not data or not data.get("players"):
             await interaction.followup.send(
-                f"Brak głosowania MVP dla meczu `#{mid}`.",
+                f"Brak głosowania MVP dla meczu `#{mid}`. "
+                f"Sztab: `/mvp start:True mecz:{mid} gracz1:@… gracz2:@…`",
                 ephemeral=True,
             )
             return
@@ -4506,7 +4617,9 @@ async def cmd_mvp(
                 break
         if found_mid is None:
             await interaction.followup.send(
-                "Brak zapisanych głosowań MVP. Pojawi się automatycznie po meczu (ze składem).",
+                "Brak zapisanych głosowań MVP."
+                + chr(10)
+                + "Sztab: `/mvp start:True gracz1:@a gracz2:@b` (opcjonalnie `mecz:`).",
                 ephemeral=True,
             )
             return
@@ -4561,6 +4674,7 @@ async def cmd_mvp(
         await interaction.followup.send(embed=emb, view=view)
     else:
         await interaction.followup.send(embed=emb)
+
 
 
 @bot.tree.command(name="wyniki", description="Ostatnie wyniki PINDOLZ")
