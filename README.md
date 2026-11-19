@@ -1,49 +1,42 @@
-> **Wersja bota: `1.9.4`** · plik [`VERSION`](VERSION) · komenda `/wersja`
+> **Wersja bota: `1.9.8`** · plik [`VERSION`](VERSION) · komenda `/wersja`
 
 # PINDOLZ Discord Bot
 
 Bot Discorda do śledzenia meczów drużyny **PINDOLZ** (ID **869**) w [StarterLeague](https://starterleague.pl).
 
-Przy każdej zmianie kodu aktualizuj **`VERSION`** i linię wersji na górze tego pliku.
+---
+
+## Co nowego w 1.9.8
+
+- Kolejka **zmian terminu**: wysyłka tylko **12:30–21:15**, **1 wiadomość co 15 min**
+- Wykrycie zmiany → zawsze do kolejki (bez spamu poza oknem)
+
+### 1.9.7
+- Ciche godziny / rekordy soft-startu tylko w embedzie / odporne przyciski składu
+- `/pomoc`, `/status` (taski + AREDL), cichsze logi Discord
+
+### 1.9.6
+- Wykrywanie zmiany terminu bez limitu 48 h
 
 ---
 
-## Co nowego w 1.9.4
+## Interwały (jak często co działa)
 
-- **Usunięte grafiki AI** (Cloudflare FLUX) – całkiem z kodu i `.env`
-
-## Co nowego w 1.9.3
-
-- **UI:** `/pindolz` (hub + menu), `/status`, `/nadchodzace`, `/aredl`, `/aredl-top` – przyciski Odśwież
-- **`/mvp-czas`** – ustawienie długości ankiety MVP (1–168 h, domyślnie 24)
-
-## Co nowego w 1.9.2
-
-- Głosowanie MVP trwa **24 h** (wcześniej 30 min)
-
-## Co nowego w 1.9.1
-
-- **`/mvp`** — wynik / status głosowania (`mecz:`, `zamknij:` dla sztabu)
-
-## Co nowego w 1.9.0
-
-- Soft-start: losowe przerwy **3–8 s**, czas na PV
-- Rekordy najkrótszy / najdłuższy soft-start (PV przy nowym rekordzie)
-- Kolejność: LIVE → … → Cleanup → GitHub → Tabela → **Status**
-
-### 1.8.x (skrót)
-- `handle_sklad_confirm`, wydarzenia Discord `entity_type`, soft-start tylko PV właściciela
-- AREDL, `/aredl-top`, ciche godziny per funkcja, `/pomoc` kategorie
-
----
-
-## Główne funkcje
-
-- Mecze: terminarze, wyniki, LIVE, tabela, prematch 60/30/10
-- Skład: DM Gram/Nie mogę, panel, rola aktywnego składu
-- MVP: głosowanie po meczu + `/mvp` + `/mvp-czas`
-- AREDL: `/aredl`, `/aredl-top`, alerty recordów (~8 min)
-- Soft-start na PV właściciela z postępem i czasem
+1. **LIVE** – co **5 s** w meczu, co **10 s** poza  
+2. **Prematch** (60/30/10 min) – co **1 min**  
+3. **Daily** (wyniki, nadchodzące, zapis terminów) – co **10 min**  
+4. **Kolejka zmian terminu** – co **15 min**, tylko **12:30–21:15**  
+5. **AREDL** (nowe recordy) – co **8 min**  
+6. **Eventy Discord** – co **5 min**  
+7. **Ankiety dostępności** – co **5 min**  
+8. **Zaplanowane wiadomości** – co **30 s**  
+9. **Status bota** (presence) – co **30 s**  
+10. **API watch** – co **60 s**  
+11. **Watchdog** (restart pętli) – co **2 min**  
+12. **Update GitHub** – co **1 h**  
+13. **Tabela** – o **8:00, 18:00, 20:00, 21:30, 23:00**  
+14. **Weekly** – o **20:00**  
+15. **Cleanup** – o **4:00**  
 
 ---
 
@@ -51,14 +44,7 @@ Przy każdej zmianie kodu aktualizuj **`VERSION`** i linię wersji na górze teg
 
 | Pole | Wartość |
 |------|--------|
-| Git Repo | `https://github.com/grabowsky721/starterleauge` |
-| Branch | `main` |
 | Bot py file | `src/bot.py` |
 | Requirements | `requirements.txt` |
 
-| Zmienna | Wymagane |
-|---------|----------|
-| `DISCORD_BOT_TOKEN` | tak |
-| `STARTERLEAGUE_API_TOKEN` | tak |
-
-Python 3.10+. **Nie commituj tokenów.**
+`DISCORD_BOT_TOKEN` + `STARTERLEAGUE_API_TOKEN` wymagane.
