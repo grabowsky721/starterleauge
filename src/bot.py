@@ -63,7 +63,7 @@ TABLE_UPDATE_TIMES = [
     time(21, 30, tzinfo=TZ),
     time(23, 0, tzinfo=TZ),
 ]
-LIVE_INTERVAL_IDLE = 40
+LIVE_INTERVAL_IDLE = 90
 LIVE_INTERVAL_ACTIVE = 5
 # Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
 # Soft-start: mecz → komendy@60s → tło → utrzymanie (~3 min)
