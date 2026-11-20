@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import base64
 import io
 import functools
@@ -25,6 +26,8 @@ from src import db, embeds
 from src.client import StarterLeagueClient, PINDOLZ_TEAM_ID
 
 load_dotenv()
+logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+logging.getLogger("discord.client").setLevel(logging.WARNING)
 
 
 def load_version() -> str:
@@ -43,6 +46,11 @@ def load_version() -> str:
 
 
 BOT_VERSION = load_version()
+
+def reload_version() -> str:
+    global BOT_VERSION
+    BOT_VERSION = load_version()
+    return BOT_VERSION
 GITHUB_REPO = "grabowsky721/starterleauge"
 GITHUB_BRANCH = "main"
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -55,7 +63,7 @@ TABLE_UPDATE_TIMES = [
     time(21, 30, tzinfo=TZ),
     time(23, 0, tzinfo=TZ),
 ]
-LIVE_INTERVAL_IDLE = 10
+LIVE_INTERVAL_IDLE = 40
 LIVE_INTERVAL_ACTIVE = 5
 # Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
 # Soft-start: mecz → komendy@60s → tło → utrzymanie (~3 min)
@@ -296,6 +304,48 @@ async def safe_ephemeral(interaction: discord.Interaction, content: str = None, 
         log("interact", f"safe_ephemeral: {e}")
 
 
+
+
+def schedule_notify_window(now: datetime | None = None) -> bool:
+    """True gdy wolno wysyłać alerty terminu: 12:30–21:15 Europe/Warsaw."""
+    now = now or datetime.now(TZ)
+    minutes = now.hour * 60 + now.minute
+    return (12 * 60 + 30) <= minutes <= (21 * 60 + 15)
+
+
+def _schedule_queue_load() -> list:
+    try:
+        return json.loads(db.get_config("schedule_alert_queue") or "[]")
+    except Exception:
+        return []
+
+
+def _schedule_queue_save(items: list) -> None:
+    db.set_config("schedule_alert_queue", json.dumps(items[-50:], ensure_ascii=False))
+
+
+def _schedule_queue_add(mid: int, old_date, old_time, match: dict) -> None:
+    items = _schedule_queue_load()
+    # jeden wpis na mecz – nadpisz
+    items = [x for x in items if int(x.get("mid") or 0) != int(mid)]
+    items.append({
+        "mid": int(mid),
+        "old_date": old_date,
+        "old_time": old_time,
+        "matchDate": match.get("matchDate"),
+        "matchTime": match.get("matchTime"),
+        "opponent": match.get("opponent") or "",
+        "raw": {
+            "id": match.get("id"),
+            "matchDate": match.get("matchDate"),
+            "matchTime": match.get("matchTime"),
+            "division": match.get("division"),
+            "team1": match.get("team1"),
+            "team2": match.get("team2"),
+        },
+    })
+    _schedule_queue_save(items)
+    log("schedule", f"kolejka rano mid={mid}")
 
 def quiet_now(feature: str | None = None) -> bool:
     """True gdy ciche godziny aktywne (23–8) i dana funkcja jest wyciszona.
@@ -569,7 +619,7 @@ def _aredl_player_embed(data: dict) -> discord.Embed:
 
 LOOP_NAMES = (
     "table_update", "daily_check", "prematch_check", "live_check", "weekly_summary", "status_loop",
-    "poll_check", "event_check", "update_check", "api_watch", "cleanup_task", "scheduled_messages_loop", "aredl_check",
+    "poll_check", "event_check", "update_check", "api_watch", "cleanup_task", "scheduled_messages_loop", "aredl_check", "schedule_queue_loop",
 )
 
 # Klucze konfiguracji tworzone osobno dla każdego meczu (sprzątane po 60 dniach bez zmian)
@@ -1238,7 +1288,31 @@ class SkladConfirmButton(discord.ui.DynamicItem[discord.ui.Button], template=r"p
         return cls(int(match["mid"]), match["ans"])
 
     async def callback(self, interaction: discord.Interaction):
-        await bot.handle_sklad_confirm(interaction, self.mid, self.ans)
+        try:
+            await bot.handle_sklad_confirm(interaction, self.mid, self.ans)
+        except AttributeError:
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "Przyciski składu są nieaktualne po restarcie bota. Kapitan: wyślij skład ponownie (`/sklad`).",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "Przyciski składu są nieaktualne po restarcie bota. Kapitan: wyślij skład ponownie (`/sklad`).",
+                        ephemeral=True,
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            log("sklad", f"confirm callback: {e}")
+            try:
+                await _safe_reply(
+                    interaction,
+                    "Nie udało się zapisać odpowiedzi. Spróbuj ponownie lub poproś o nowy skład.",
+                )
+            except Exception:
+                pass
 
 
 def sklad_confirm_view(mid: int) -> discord.ui.View:
@@ -2112,6 +2186,8 @@ class PindolzBot(commands.Bot):
         async def start_daily():
             if not self.daily_check.is_running():
                 self.daily_check.start()
+            if not self.schedule_queue_loop.is_running():
+                self.schedule_queue_loop.start()
 
         async def start_commands():
             # Od razu sync global + guild – bez UI „1/39 komend”
@@ -2206,48 +2282,7 @@ class PindolzBot(commands.Bot):
             done, elapsed_sec=elapsed, min_sec=min_sec, max_sec=max_sec
         )
         log("start", f"soft-start zakończony w {sec} s (min={min_sec}, max={max_sec})")
-        # Osobne PV tylko przy nowym rekordzie min/max (nie przy 1. starcie obu naraz bez historii)
-        try:
-            prev_min = db.get_config("soft_start_prev_notified_min")
-            prev_max = db.get_config("soft_start_prev_notified_max")
-            is_new_min = str(min_sec) != str(prev_min) and min_sec == sec
-            is_new_max = str(max_sec) != str(prev_max) and max_sec == sec
-            # powiadom gdy ten start ustawił rekord (i nie jest to pierwszy zapis obu jako ten sam)
-            runs = int(db.get_config("soft_start_runs") or "0") + 1
-            db.set_config("soft_start_runs", str(runs))
-            if runs >= 2 and (is_new_min or is_new_max):
-                bits = []
-                if is_new_min:
-                    bits.append(f"⚡ **Nowy najkrótszy soft-start: {min_sec} s**")
-                if is_new_max:
-                    bits.append(f"🐢 **Nowy najdłuższy soft-start: {max_sec} s**")
-                bits.append(f"Ten start: **{sec} s** · rekordy: min **{min_sec} s** / max **{max_sec} s**")
-                text = "\n".join(bits)
-                text = chr(10).join(bits)
-                owner_ids = []
-                main_id = self._main_channel_id()
-                if main_id:
-                    ch = await self.get_channel_safe(main_id)
-                    g = getattr(ch, "guild", None) if ch else None
-                    if g and g.owner_id:
-                        owner_ids.append(int(g.owner_id))
-                for g in self.guilds:
-                    if g.owner_id and int(g.owner_id) not in owner_ids:
-                        owner_ids.append(int(g.owner_id))
-                for oid in owner_ids[:1]:
-                    try:
-                        u = self.get_user(oid) or await self.fetch_user(oid)
-                        await u.send(text)
-                        log("start", f"rekord soft-start PV → {oid}")
-                    except Exception as e:
-                        log("start", f"rekord PV: {e}")
-                db.set_config("soft_start_prev_notified_min", str(min_sec))
-                db.set_config("soft_start_prev_notified_max", str(max_sec))
-            elif runs == 1:
-                db.set_config("soft_start_prev_notified_min", str(min_sec))
-                db.set_config("soft_start_prev_notified_max", str(max_sec))
-        except Exception as e:
-            log("start", f"rekord notify: {e}")
+        # rekordy min/max tylko w embedzie startu (bez osobnego PV)
         # upewnij się, że wiadomość startu zniknie max po 2 min od ready
         async def _ensure_boot_deleted():
             await asyncio.sleep(120)
@@ -2515,15 +2550,60 @@ class PindolzBot(commands.Bot):
     @tasks.loop(minutes=10)
     @guarded
     async def daily_check(self):
-        if quiet_now("daily"):
-            return
-        await self._run_daily_check()
+        # Ciche godziny: ograniczony daily; kolejka terminów tylko 12:30–21:15
+        await self._run_daily_check(quiet_mode=quiet_now("daily"))
 
     @daily_check.before_loop
     async def before_daily(self):
         await self.wait_until_ready()
 
-    async def _run_daily_check(self):
+    @tasks.loop(seconds=15)
+    @guarded
+    async def schedule_queue_loop(self):
+        """1 alert terminu z kolejki co 15 s, tylko 12:30–21:15."""
+        if not schedule_notify_window():
+            return
+        channel = await self.get_channel_safe(self._main_channel_id())
+        if not channel:
+            return
+        try:
+            await self._flush_schedule_queue(channel, one=True)
+        except Exception as e:
+            log("schedule", f"queue loop: {e}")
+
+    @schedule_queue_loop.before_loop
+    async def before_schedule_queue_loop(self):
+        await self.wait_until_ready()
+
+    async def _flush_schedule_queue(self, channel, *, one: bool = True) -> None:
+        """Wysyła kolejkę zmian terminu tylko 12:30–21:15; domyślnie 1 wiadomość."""
+        items = _schedule_queue_load()
+        if not items or not channel:
+            return
+        if not schedule_notify_window():
+            log("schedule", f"kolejka czeka (poza 12:30–21:15), pozycji: {len(items)}")
+            return
+        left = list(items)
+        to_send = left[:1] if one else list(left)
+        left = left[1:] if one else []
+        for it in to_send:
+            try:
+                raw = it.get("raw") or {}
+                mid = it.get("mid")
+                await channel.send(
+                    content="⚠️ **Zmiana terminu meczu!** (z kolejki)",
+                    embed=embeds.schedule_changed_embed(
+                        raw, it.get("old_date"), it.get("old_time")
+                    ),
+                )
+                log("schedule", f"wysłano z kolejki mid={mid} (zostało {len(left)})")
+            except Exception as e:
+                log("schedule", f"kolejka send: {e}")
+                left.insert(0, it)
+                break
+        _schedule_queue_save(left)
+
+    async def _run_daily_check(self, quiet_mode: bool = False):
         channel = await self.get_channel_safe(self._main_channel_id())
         if not channel:
             return
@@ -2534,6 +2614,10 @@ class PindolzBot(commands.Bot):
             log("daily", f"API error: {e}")
             return
         now = datetime.now(TZ)
+        try:
+            await self._flush_schedule_queue(channel)
+        except Exception as e:
+            log("schedule", f"flush: {e}")
         form = await asyncio.to_thread(lambda: self.api.get_form(history, limit=5))
         standing = None
         try:
@@ -2541,6 +2625,8 @@ class PindolzBot(commands.Bot):
         except Exception:
             pass
         cutoff = now - timedelta(days=14)
+        if quiet_mode:
+            history = []  # w nocy bez postowania wyników – tylko termin (upcoming poniżej)
         for m in history:
             mid = m.get("id")
             if mid is None:
@@ -2580,6 +2666,9 @@ class PindolzBot(commands.Bot):
                         await self._edit_or_send(live_ch, embeds.match_ended_embed(m, form=form, standing=standing), row.get("msg_live_id"), row.get("msg_live_ch"))
                 except Exception:
                     pass
+        # Nadchodzące: śledź termin WSZYSTKICH meczów z API (nie tylko 48 h).
+        # Wcześniej filtr 48 h powodował, że zmiana terminu wychodziła dopiero
+        # gdy mecz wszedł w okno – często po kilku dniach.
         for m in upcoming:
             mid = m.get("id")
             if mid is None:
@@ -2590,28 +2679,95 @@ class PindolzBot(commands.Bot):
                 dt = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
             except Exception:
                 dt = None
-            if dt and not (now <= dt <= now + timedelta(hours=48)):
-                continue
             row = db.get_match(mid)
             opponent = self._opponent(m)
-            if row and row.get("notified_upcoming"):
-                date_changed = row.get("match_date") != m.get("matchDate") or (row.get("match_time") or "")[:5] != (m.get("matchTime") or "")[:5]
+            date_changed = False
+            opp_changed = False
+            if row:
+                date_changed = (
+                    row.get("match_date") != m.get("matchDate")
+                    or (row.get("match_time") or "")[:5] != (m.get("matchTime") or "")[:5]
+                )
                 opp_changed = row.get("opponent") != opponent
                 if date_changed or opp_changed:
-                    msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), row.get("msg_upcoming_id"), row.get("msg_upcoming_ch"), view=remind_view(mid))
+                    msg_id, ch_id = row.get("msg_upcoming_id"), row.get("msg_upcoming_ch")
+                    if row.get("notified_upcoming"):
+                        msg_id, ch_id = await self._edit_or_send(
+                            channel,
+                            embeds.single_upcoming_embed(m),
+                            msg_id,
+                            ch_id,
+                            view=remind_view(mid),
+                        )
                     if date_changed:
                         try:
-                            await channel.send(
-                            content="⚠️ **Zmiana terminu meczu!**",
-                            embed=embeds.schedule_changed_embed(m, row.get("match_date"), row.get("match_time")),
-                        )
-
+                            # Zawsze do kolejki; wysyłka tylko 12:30–21:15, 1 szt. / 15 min
+                            _schedule_queue_add(
+                                int(mid),
+                                row.get("match_date"),
+                                row.get("match_time"),
+                                m,
+                            )
+                            log(
+                                "schedule",
+                                f"zmiana terminu mid={mid} "
+                                f"{row.get('match_date')} {row.get('match_time')} → "
+                                f"{m.get('matchDate')} {m.get('matchTime')} [kolejka]",
+                            )
                         except Exception as e:
-                            print(f"[schedule] send error: {e}")
-                    db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
+                            log("schedule", f"send error: {e}")
+                    db.upsert_match(
+                        mid,
+                        match_date=m.get("matchDate"),
+                        match_time=m.get("matchTime"),
+                        division=m.get("division"),
+                        opponent=opponent,
+                        msg_upcoming_id=msg_id,
+                        msg_upcoming_ch=ch_id,
+                    )
+                    if date_changed:
+                        db.set_config(f"event_fail_{mid}", "0")
+                    if row.get("notified_upcoming"):
+                        continue
+            # Pierwsze ogłoszenie nadchodzącego: do 14 dni w przód (wcześniej 48 h)
+            if dt and not (now <= dt <= now + timedelta(days=14)):
+                # zapisz termin w bazie, żeby później wykryć zmianę
+                db.upsert_match(
+                    mid,
+                    match_date=m.get("matchDate"),
+                    match_time=m.get("matchTime"),
+                    division=m.get("division"),
+                    opponent=opponent,
+                    status="scheduled",
+                )
                 continue
-            msg_id, ch_id = await self._edit_or_send(channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid))
-            db.upsert_match(mid, match_date=m.get("matchDate"), match_time=m.get("matchTime"), division=m.get("division"), opponent=opponent, status="scheduled", notified_upcoming=1, msg_upcoming_id=msg_id, msg_upcoming_ch=ch_id)
+            if row and row.get("notified_upcoming"):
+                continue
+            if quiet_mode:
+                # zapisz termin, ogłoszenie rano
+                db.upsert_match(
+                    mid,
+                    match_date=m.get("matchDate"),
+                    match_time=m.get("matchTime"),
+                    division=m.get("division"),
+                    opponent=opponent,
+                    status="scheduled",
+                )
+                continue
+            msg_id, ch_id = await self._edit_or_send(
+                channel, embeds.single_upcoming_embed(m), None, None, view=remind_view(mid)
+            )
+            db.upsert_match(
+                mid,
+                match_date=m.get("matchDate"),
+                match_time=m.get("matchTime"),
+                division=m.get("division"),
+                opponent=opponent,
+                status="scheduled",
+                notified_upcoming=1,
+                msg_upcoming_id=msg_id,
+                msg_upcoming_ch=ch_id,
+            )
 
     PREMATCH_MINUTES = 30
 
@@ -2754,7 +2910,7 @@ class PindolzBot(commands.Bot):
         except Exception as e:
             self._live_errors = getattr(self, "_live_errors", 0) + 1
             log("live", f"API error ({self._live_errors}): {e}")
-            backoff = min(30, LIVE_INTERVAL_IDLE * (1 + self._live_errors // 2))
+            backoff = min(90, LIVE_INTERVAL_IDLE * (1 + self._live_errors // 2))
             if self.live_check.seconds != backoff:
                 self.live_check.change_interval(seconds=backoff)
             return
@@ -3027,7 +3183,7 @@ class PindolzBot(commands.Bot):
 
 
 
-    @tasks.loop(minutes=8)
+    @tasks.loop(minutes=10)
     @guarded
     async def aredl_check(self):
         """Nowe zatwierdzone recordy klanu AREDL → kanał + opcjonalny ping roli."""
@@ -3873,6 +4029,7 @@ class PindolzBot(commands.Bot):
             if abs(ev.start_time.timestamp() - dt.timestamp()) > 30 or ev.name != name or (ev.description or "") != desc:
                 try:
                     await ev.edit(name=name, start_time=dt, end_time=end, description=desc)
+                    db.set_config(f"event_fail_{mid}", "0")
                     log("event", f"zaktualizowano wydarzenie meczu {mid}")
                 except Exception as e:
                     log("event", f"edit error: {e}")
@@ -4075,7 +4232,7 @@ class PindolzBot(commands.Bot):
         r.raise_for_status()
         return r.text.strip()
 
-    @tasks.loop(hours=1)
+    @tasks.loop(minutes=15)
     @guarded
     async def update_check(self):
         if not feature_on("updates"):
@@ -4114,7 +4271,7 @@ class PindolzBot(commands.Bot):
             "Bot działa dalej. Jeśli to się powtarza, sprawdź uprawnienia bota na kanałach i log serwera."
         )
 
-    @tasks.loop(minutes=2)
+    @tasks.loop(minutes=5)
     @guarded
     async def loop_watchdog(self):
         """Wznawia zadania w tle, które mimo osłony się zatrzymały."""
@@ -4151,7 +4308,7 @@ class PindolzBot(commands.Bot):
             return "⏳ **API StarterLeague zwraca limit zapytań** (HTTP 429). Bot spróbuje ponownie sam."
         return f"🚨 **API StarterLeague nie odpowiada od ok. 3 minut.**\n`{str(err)[:300]}`"
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(seconds=120)
     @guarded
     async def api_watch(self):
         if not feature_on("alerts"):
@@ -4415,6 +4572,9 @@ async def _build_status_embed() -> discord.Embed:
     def ch_line(label, cid):
         return f"{label}: **nie ustawiony**" if not cid else f"{label}: <#{cid}>"
 
+    def _task(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
     uptime = datetime.now(TZ) - bot.started_at
     h, rem = divmod(int(uptime.total_seconds()), 3600)
     m, s = divmod(rem, 60)
@@ -4422,7 +4582,14 @@ async def _build_status_embed() -> discord.Embed:
     emb = discord.Embed(title="Status bota PINDOLZ", color=0x3B82F6, timestamp=datetime.now(TZ))
     emb.add_field(name="Wersja", value=f"`{BOT_VERSION}`", inline=True)
     emb.add_field(name="Uptime", value=up, inline=True)
-    emb.add_field(name="LIVE task", value="✅" if bot.live_check.is_running() else "❌", inline=True)
+    emb.add_field(name="LIVE", value=_task(bot.live_check.is_running()), inline=True)
+    emb.add_field(name="Prematch", value=_task(bot.prematch_check.is_running()), inline=True)
+    emb.add_field(name="Daily", value=_task(bot.daily_check.is_running()), inline=True)
+    emb.add_field(
+        name="AREDL",
+        value=_task(bot.aredl_check.is_running()) + " · co **10 min**",
+        inline=True,
+    )
     emb.add_field(name="API StarterLeague", value=f"{api_ok} {api_detail}", inline=False)
     emb.add_field(
         name="Kanały",
@@ -4430,6 +4597,9 @@ async def _build_status_embed() -> discord.Embed:
         inline=False,
     )
     emb.add_field(name="MVP (czas ankiety)", value=f"**{mvp_duration_hours()} h**", inline=True)
+    q = len(_schedule_queue_load())
+    if q:
+        emb.add_field(name="Kolejka terminów", value=f"**{q}** · 12:30–21:15 · co 15 s", inline=True)
     return emb
 
 
@@ -4738,26 +4908,34 @@ def _pomoc_category_embed(cat: str) -> discord.Embed:
         emb.title = "📊 Mecze i liga"
         emb.description = (
             "`/pindolz` · `/nadchodzace` · `/wyniki` · `/live` · `/tabela`\n"
-            "`/gracze` · `/wersja` · `/status`"
+            "`/mvp` · `/mvp-czas` · `/gracze` · `/wersja` · `/status`"
         )
     elif cat == "sklad":
         emb.title = "👥 Skład i sztab"
         emb.description = (
-            "`/sklad` · `/panel` · `/polacz` · `/ping-sklad` · `/moj-status`\n"
-            "`/trening` · `/ogloszenie` · `/zaplanuj`"
+            "`/sklad` · `/panel` · `/polacz` · `/ping-sklad` · `/sklad-status` · `/moj-status`\n"
+            "`/kapitan` · `/vicekapitan` · `/coach` · `/sztab`\n"
+            "`/trening` · `/ogloszenie` · `/szablon-*` · `/zaplanuj`"
         )
     elif cat == "aredl":
         emb.title = "🎮 AREDL"
-        emb.description = "`/aredl` · `/aredl nick:` · `/aredl-top`\n`/setup-aredl`"
+        emb.description = (
+            "`/aredl` · `/aredl nick:` · `/aredl-top`\n"
+            "`/setup-aredl`"
+        )
     elif cat == "setup":
         emb.title = "⚙️ Setup / admin"
         emb.description = (
-            "`/setup*` · `/ustawienia` (ciche godziny per funkcja)\n"
+            "`/setup*` · `/ustawienia` · `/mvp-czas`\n"
             "`/gif-*` · `/pokaz-embedy`"
         )
     else:
         emb.title = "🤖 Automaty"
-        emb.description = "Prematch · LIVE · tabela · GIF · AI\nAREDL (~8 min) · weekly · ciche 23–8"
+        emb.description = (
+            "Prematch 60/30/10 · LIVE · tabela · GIF\n"
+            "Zmiana terminu (kolejka poza 12:30–21:15)\n"
+            "AREDL ~10 min · MVP · weekly · soft-start PV"
+        )
     emb.set_footer(text="Wybierz inną kategorię z listy poniżej")
     return emb
 
@@ -4813,28 +4991,7 @@ async def cmd_wersja(interaction: discord.Interaction):
 @bot.tree.command(name="status", description="Status bota, API i kanałów")
 async def cmd_status(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    api_ok, api_detail = "❌", "błąd"
-    try:
-        lives = await asyncio.to_thread(bot.api.get_pindolz_live)
-        api_ok, api_detail = "✅", f"OK · live: {len(lives)}"
-    except Exception as e:
-        api_detail = str(e)[:120]
-    main_id, live_id, table_id = bot._main_channel_id(), bot._live_channel_id(), bot._table_channel_id()
-
-    def ch_line(label, cid):
-        return f"{label}: **nie ustawiony**" if not cid else f"{label}: <#{cid}>"
-
-    uptime = datetime.now(TZ) - bot.started_at
-    h, rem = divmod(int(uptime.total_seconds()), 3600)
-    m, s = divmod(rem, 60)
-    up = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
-    emb = discord.Embed(title="Status bota PINDOLZ", color=0x3B82F6, timestamp=datetime.now(TZ))
-    emb.add_field(name="Wersja", value=f"`{BOT_VERSION}`", inline=True)
-    emb.add_field(name="Uptime", value=up, inline=True)
-    emb.add_field(name="LIVE task", value="✅" if bot.live_check.is_running() else "❌", inline=True)
-    emb.add_field(name="API StarterLeague", value=f"{api_ok} {api_detail}", inline=False)
-    emb.add_field(name="Kanały", value="\n".join([ch_line("Główny", main_id), ch_line("LIVE", live_id), ch_line("Tabela", table_id)]), inline=False)
-    emb.add_field(name="MVP (czas ankiety)", value=f"**{mvp_duration_hours()} h**", inline=True)
+    emb = await _build_status_embed()
     await interaction.followup.send(embed=emb, view=StatusRefreshView(), ephemeral=True)
 
 
@@ -5782,7 +5939,8 @@ async def cmd_coach(interaction: discord.Interaction, osoba: Optional[discord.Me
 @bot.event
 async def on_ready():
     log("ready", f"Zalogowano jako {bot.user} (ID: {bot.user.id})")
-    log("ready", f"Wersja: {BOT_VERSION}")
+    ver = reload_version()
+    log("ready", f"Wersja: {ver} (z pliku VERSION)")
     try:
         embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
     except Exception:
