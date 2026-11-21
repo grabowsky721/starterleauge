@@ -1,4 +1,4 @@
-> **Wersja bota: `1.9.10`** · plik [`VERSION`](VERSION) · komenda `/wersja`
+> **Wersja bota: `1.9.13`** · plik [`VERSION`](VERSION) · komenda `/wersja`
 
 # PINDOLZ Discord Bot
 
