@@ -65,72 +65,6 @@ TABLE_UPDATE_TIMES = [
 ]
 LIVE_INTERVAL_IDLE = 90
 LIVE_INTERVAL_ACTIVE = 5
-# Soft-start (od ready): LIVE 20s → +15 prematch → +10 tabela → +15 daily → potem co 20s; weekly na końcu
-# Soft-start: mecz → komendy@60s → tło → utrzymanie (~3 min)
-# Soft-start łącznie ~35 s od ready
-# Soft-start: LIVE pierwszy → … → tabela przedostatnia → status ostatni (~20 s)
-START_DELAY_LIVE = 2
-START_DELAY_PREMATCH = 4
-START_DELAY_DAILY = 6
-START_DELAY_COMMANDS = 8
-START_DELAY_TABLE = 12
-START_DELAY_STATUS = 16
-START_DELAY_POLL = 20
-START_DELAY_API = 24
-START_DELAY_EVENT = 26
-START_DELAY_CLEANUP = 28
-START_DELAY_UPDATE = 30
-START_DELAY_WEEKLY = 35
-START_DELAY_COMMANDS_SYNC = 8
-COMMAND_START_GAP = 0
-COMMAND_START_ORDER = [
-    "pomoc",
-    "setup",
-    "setup-live",
-    "setup-tabela",
-    "setup-ankiety",
-    "setup-rola-sklad",
-    "setup-ogloszenia",
-    "setup-aredl",
-    "setup-all",
-    "aredl",
-    "aredl-top",
-    "status",
-    "wersja",
-    "ankieta-role",
-    "sklad",
-    "polacz",
-    "gracze",
-    "tabela",
-    "nadchodzace",
-    "wyniki",
-    "mvp",
-    "mvp-czas",
-    "pindolz",
-    "live",
-    "ustawienia",
-    "pokaz-embedy",
-    "gif-dodaj",
-    "gif-lista",
-    "gif-usun",
-    "panel",
-    "sklad-status",
-    "ping-sklad",
-    "moj-status",
-    "kapitan",
-    "zastepstwo",
-    "zastepstwo-koniec",
-    "vicekapitan",
-    "sztab",
-    "trening",
-    "ogloszenie",
-    "szablon-usun",
-    "szablon-lista",
-    "szablon-dodaj",
-    "zaplanuj",
-    "zaplanuj-lista",
-    "coach",
-]
 
 # Losowe hasła w statusie bota – możesz je dowolnie zmieniać (max ~120 znaków każde)
 STATUS_PHRASES = [
@@ -307,10 +241,10 @@ async def safe_ephemeral(interaction: discord.Interaction, content: str = None, 
 
 
 def schedule_notify_window(now: datetime | None = None) -> bool:
-    """True gdy wolno wysyłać alerty terminu: 12:30–21:15 Europe/Warsaw."""
+    """True gdy wolno wysyłać alerty terminu: 9:30–21:15 Europe/Warsaw."""
     now = now or datetime.now(TZ)
     minutes = now.hour * 60 + now.minute
-    return (12 * 60 + 30) <= minutes <= (21 * 60 + 15)
+    return (9 * 60 + 30) <= minutes <= (21 * 60 + 15)
 
 
 def _schedule_queue_load() -> list:
@@ -2025,17 +1959,20 @@ class PindolzBot(commands.Bot):
         self._status_current = None
         self._api_fail = 0
         self._api_alerted = False
-        self._boot_msg = None
         db.init_db()
 
     async def setup_hook(self):
         self.add_view(RefreshTabelaView())
         self.add_view(RefreshWynikiView())
         try:
-            self.add_dynamic_items(RemindButton, PollButton, GGButton, SkladConfirmButton, TreningButton, TreningStaffButton, TreningRateButton, TreningRateStaffButton, MvpButton)
+            self.add_dynamic_items(
+                RemindButton, PollButton, GGButton, SkladConfirmButton,
+                TreningButton, TreningStaffButton, TreningRateButton,
+                TreningRateStaffButton, MvpButton,
+            )
         except Exception as e:
             print(f"[start] dynamic items: {e}")
-        asyncio.create_task(self._soft_start_tasks())
+        asyncio.create_task(self._start_all_tasks())
         asyncio.create_task(self._reschedule_training_polls())
 
 
@@ -2062,118 +1999,17 @@ class PindolzBot(commands.Bot):
             log("trening", f"reschedule: {e}")
 
 
-    BOOT_LABELS = (
-        ("live", "LIVE"),
-        ("prematch", "Przypomnienia"),
-        ("daily", "Daily"),
-        ("commands", "Komendy slash"),
-        ("poll", "Ankiety"),
-        ("api", "API watch"),
-        ("event", "Eventy"),
-        ("scheduled", "Zaplanowane"),
-        ("aredl", "AREDL"),
-        ("weekly", "Weekly"),
-        ("cleanup", "Cleanup"),
-        ("update", "Update GitHub"),
-        ("table", "Tabela"),
-        ("status", "Status"),
-    )
-
-    def _boot_progress_embed(
-        self,
-        done: set[str],
-        current: str | None = None,
-        elapsed_sec: float | None = None,
-        min_sec: int | None = None,
-        max_sec: int | None = None,
-    ) -> discord.Embed:
-        lines = []
-        for key, label in self.BOOT_LABELS:
-            if key in done:
-                lines.append(f"✅ {label}")
-            elif key == current:
-                lines.append(f"🔄 {label}…")
-            else:
-                lines.append(f"⏳ {label}")
-        done_n = len(done)
-        total = len(self.BOOT_LABELS)
-        emb = embeds.restart_embed(
-            BOT_VERSION,
-            self._main_channel_id(),
-            self._live_channel_id(),
-            self._table_channel_id(),
-        )
-        emb.set_footer(text="PV właściciela · zniknie za ~2 min")
-        emb.title = f"🚀 Start bota ({done_n}/{total})"
-        if done_n >= total:
-            emb.title = f"✅ Bot gotowy ({total}/{total})"
-            if elapsed_sec is not None:
-                sec = int(round(elapsed_sec))
-                emb.description = (
-                    f"Wersja **`{BOT_VERSION}`** · wszystko załadowane"
-                    + chr(10)
-                    + f"⏱ Soft-start: **{sec} s**"
-                )
-                if min_sec is not None and max_sec is not None:
-                    emb.description += (
-                        chr(10)
-                        + f"⚡ Najkrótszy: **{min_sec} s** · 🐢 Najdłuższy: **{max_sec} s**"
-                    )
-            else:
-                emb.description = f"Wersja **`{BOT_VERSION}`** · wszystko załadowane"
-            emb.color = embeds.C_WIN if hasattr(embeds, "C_WIN") else emb.color
-        elif elapsed_sec is not None:
-            sec = int(round(elapsed_sec))
-            emb.description = (
-                f"Wersja **`{BOT_VERSION}`** · soft-start w toku · **{sec} s**"
-            )
-        else:
-            emb.description = f"Wersja **`{BOT_VERSION}`** · soft-start w toku"
-        emb.add_field(name="Postęp ładowania", value="\n".join(lines), inline=False)
-        return emb
-
-    async def _boot_set_progress(
-        self,
-        done: set[str],
-        current: str | None = None,
-        elapsed_sec: float | None = None,
-        min_sec: int | None = None,
-        max_sec: int | None = None,
-    ):
-        msg = getattr(self, "_boot_msg", None)
-        if not msg:
-            return
-        try:
-            await msg.edit(
-                embed=self._boot_progress_embed(
-                    done, current, elapsed_sec=elapsed_sec, min_sec=min_sec, max_sec=max_sec
-                )
-            )
-        except Exception as e:
-            log("boot", f"{e}")
-
-
-    async def _soft_start_tasks(self):
-        """Mecz → sync komend → tło (łącznie ~35 s)."""
+    async def _start_all_tasks(self):
+        """Start wszystkich pętli od razu (bez soft-startu) + sync komend."""
         await self.wait_until_ready()
-        log("start", "soft-start (14× losowo 3–8 s)…")
-        t0 = datetime.now(TZ)
-        done: set[str] = set()
+        log("start", "start zadań w tle…")
 
-        async def run_step(key: str, wait: float, action):
-            elapsed = (datetime.now(TZ) - t0).total_seconds()
-            await self._boot_set_progress(done, current=key, elapsed_sec=elapsed)
-            # Zawsze losowa przerwa 3–8 s (parametr wait ignorowany – kompatybilność sygnatury)
-            delay = random.randint(3, 8)
-            await asyncio.sleep(delay)
+        async def _safe_start(name, starter):
             try:
-                await action()
+                await starter()
+                log("start", name)
             except Exception as e:
-                log("start", f"{key} błąd: {type(e).__name__}: {e}")
-            done.add(key)
-            elapsed = (datetime.now(TZ) - t0).total_seconds()
-            await self._boot_set_progress(done, elapsed_sec=elapsed)
-            log("start", f"{key} (+{delay}s, łącznie {int(elapsed)}s)")
+                log("start", f"{name} błąd: {type(e).__name__}: {e}")
 
         async def start_live():
             if not self.live_check.is_running():
@@ -2190,7 +2026,6 @@ class PindolzBot(commands.Bot):
                 self.schedule_queue_loop.start()
 
         async def start_commands():
-            # Od razu sync global + guild – bez UI „1/39 komend”
             try:
                 synced = await self.tree.sync()
                 names = [c.name for c in synced]
@@ -2228,6 +2063,11 @@ class PindolzBot(commands.Bot):
         async def start_cleanup():
             if not self.cleanup_task.is_running():
                 self.cleanup_task.start()
+            # jednorazowy cleanup zaraz po starcie
+            try:
+                await self._run_cleanup(reason="startup")
+            except Exception as e:
+                log("cleanup", f"startup: {e}")
 
         async def start_update():
             if not self.update_check.is_running():
@@ -2245,55 +2085,26 @@ class PindolzBot(commands.Bot):
             if not self.aredl_check.is_running():
                 self.aredl_check.start()
 
-        # Soft-start: LIVE po 5s → … → cleanup → GitHub → tabela → status
-        await run_step("live", 5, start_live)
-        await run_step("prematch", 2, start_prematch)
-        await run_step("daily", 2, start_daily)
-        await run_step("commands", 2, start_commands)
-        await run_step("poll", 1, start_poll)
-        await run_step("api", 1, start_api)
-        await run_step("event", 1, start_event)
-        await run_step("scheduled", 0, start_scheduled)
-        await run_step("aredl", 0, start_aredl)
-        await run_step("weekly", 1, start_weekly)
-        await run_step("cleanup", 1, start_cleanup)
-        await run_step("update", 1, start_update)
-        await run_step("table", 1, start_table)
-        await run_step("status", 1, start_status)
-
+        # równolegle – bez opóźnień
+        await asyncio.gather(
+            _safe_start("live", start_live),
+            _safe_start("prematch", start_prematch),
+            _safe_start("daily", start_daily),
+            _safe_start("commands", start_commands),
+            _safe_start("poll", start_poll),
+            _safe_start("api", start_api),
+            _safe_start("event", start_event),
+            _safe_start("scheduled", start_scheduled),
+            _safe_start("aredl", start_aredl),
+            _safe_start("weekly", start_weekly),
+            _safe_start("cleanup", start_cleanup),
+            _safe_start("update", start_update),
+            _safe_start("table", start_table),
+            _safe_start("status", start_status),
+        )
         if not self.loop_watchdog.is_running():
             self.loop_watchdog.start()
-        elapsed = (datetime.now(TZ) - t0).total_seconds()
-        sec = int(round(elapsed))
-        min_sec = max_sec = sec
-        try:
-            raw_min = db.get_config("soft_start_min_sec")
-            raw_max = db.get_config("soft_start_max_sec")
-            if raw_min is not None and str(raw_min).strip() != "":
-                min_sec = min(int(raw_min), sec)
-            if raw_max is not None and str(raw_max).strip() != "":
-                max_sec = max(int(raw_max), sec)
-            db.set_config("soft_start_min_sec", str(min_sec))
-            db.set_config("soft_start_max_sec", str(max_sec))
-        except Exception as e:
-            log("start", f"soft_start stats: {e}")
-            min_sec = max_sec = sec
-        await self._boot_set_progress(
-            done, elapsed_sec=elapsed, min_sec=min_sec, max_sec=max_sec
-        )
-        log("start", f"soft-start zakończony w {sec} s (min={min_sec}, max={max_sec})")
-        # rekordy min/max tylko w embedzie startu (bez osobnego PV)
-        # upewnij się, że wiadomość startu zniknie max po 2 min od ready
-        async def _ensure_boot_deleted():
-            await asyncio.sleep(120)
-            msg = getattr(self, "_boot_msg", None)
-            if msg:
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                self._boot_msg = None
-        asyncio.create_task(_ensure_boot_deleted())
+        log("start", "wszystkie zadania uruchomione")
 
     def is_owner(self, interaction: discord.Interaction) -> bool:
         uid = interaction.user.id
@@ -2550,7 +2361,7 @@ class PindolzBot(commands.Bot):
     @tasks.loop(minutes=10)
     @guarded
     async def daily_check(self):
-        # Ciche godziny: ograniczony daily; kolejka terminów tylko 12:30–21:15
+        # Ciche godziny: ograniczony daily; kolejka terminów tylko 9:30–21:15
         await self._run_daily_check(quiet_mode=quiet_now("daily"))
 
     @daily_check.before_loop
@@ -2560,7 +2371,7 @@ class PindolzBot(commands.Bot):
     @tasks.loop(seconds=15)
     @guarded
     async def schedule_queue_loop(self):
-        """1 alert terminu z kolejki co 15 s, tylko 12:30–21:15."""
+        """1 alert terminu z kolejki co 15 s, tylko 9:30–21:15."""
         if not schedule_notify_window():
             return
         channel = await self.get_channel_safe(self._main_channel_id())
@@ -2576,12 +2387,12 @@ class PindolzBot(commands.Bot):
         await self.wait_until_ready()
 
     async def _flush_schedule_queue(self, channel, *, one: bool = True) -> None:
-        """Wysyła kolejkę zmian terminu tylko 12:30–21:15; domyślnie 1 wiadomość."""
+        """Wysyła kolejkę zmian terminu tylko 9:30–21:15; domyślnie 1 wiadomość."""
         items = _schedule_queue_load()
         if not items or not channel:
             return
         if not schedule_notify_window():
-            log("schedule", f"kolejka czeka (poza 12:30–21:15), pozycji: {len(items)}")
+            log("schedule", f"kolejka czeka (poza 9:30–21:15), pozycji: {len(items)}")
             return
         left = list(items)
         to_send = left[:1] if one else list(left)
@@ -2701,7 +2512,7 @@ class PindolzBot(commands.Bot):
                         )
                     if date_changed:
                         try:
-                            # Zawsze do kolejki; wysyłka tylko 12:30–21:15, 1 szt. / 15 min
+                            # Zawsze do kolejki; wysyłka tylko 9:30–21:15, 1 szt. / 15 s
                             _schedule_queue_add(
                                 int(mid),
                                 row.get("match_date"),
@@ -4331,18 +4142,92 @@ class PindolzBot(commands.Bot):
     async def before_api_watch(self):
         await self.wait_until_ready()
 
-    @tasks.loop(time=time(4, 0, tzinfo=TZ))
-    @guarded
-    async def cleanup_task(self):
+    async def _run_cleanup(self, reason: str = "scheduled") -> None:
+        """Pełny cleanup: mecze, config per-mecz, wysłane sched, stare klucze, VACUUM."""
+        log("cleanup", f"start ({reason})")
+        total = 0
         try:
             n = db.cleanup_old(30)
             if n:
-                print(f"[cleanup] usunięto {n} starych rekordów")
+                log("cleanup", f"mecze: usunięto {n}")
+                total += n
+        except Exception as e:
+            log("cleanup", f"mecze error: {e}")
+
+        try:
             c = db.cleanup_config(PER_MATCH_CONFIG_PREFIXES, 60)
             if c:
-                print(f"[cleanup] usunięto {c} nieaktualnych kluczy konfiguracji")
+                log("cleanup", f"config per-mecz: usunięto {c}")
+                total += c
         except Exception as e:
-            print(f"[cleanup] error: {e}")
+            log("cleanup", f"config error: {e}")
+
+        try:
+            extra_prefixes = ("mvp_votes_", "lineup_confirm_", "live_thread_")
+            c2 = db.cleanup_config(extra_prefixes, 60)
+            if c2:
+                log("cleanup", f"mvp/extra: usunięto {c2}")
+                total += c2
+        except Exception as e:
+            log("cleanup", f"mvp/extra error: {e}")
+
+        try:
+            s = db.cleanup_sent_sched(max_keep=30)
+            if s:
+                log("cleanup", f"sched sent: usunięto {s}")
+                total += s
+        except Exception as e:
+            log("cleanup", f"sched error: {e}")
+
+        try:
+            junk = db.cleanup_keys_exact([
+                "soft_start_min_sec",
+                "soft_start_max_sec",
+            ])
+            if junk:
+                log("cleanup", f"junk keys: usunięto {junk}")
+                total += junk
+        except Exception as e:
+            log("cleanup", f"junk error: {e}")
+
+        try:
+            seq = int(db.get_config("training_poll_seq") or "1")
+            now_ts = int(datetime.now(TZ).timestamp())
+            tdel = 0
+            for pid in range(max(1, seq - 80), seq):
+                key = f"training_poll_{pid}"
+                raw = db.get_config(key)
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if data.get("phase") != "done" and not data.get("closed"):
+                    continue
+                closes = int(data.get("closes_at") or data.get("when") or 0)
+                if closes and now_ts - closes > 14 * 86400:
+                    db.set_config(key, None)
+                    tdel += 1
+            if tdel:
+                log("cleanup", f"trening: usunięto {tdel}")
+                total += tdel
+        except Exception as e:
+            log("cleanup", f"trening error: {e}")
+
+        try:
+            if total > 0:
+                db.vacuum()
+                log("cleanup", "VACUUM OK")
+        except Exception as e:
+            log("cleanup", f"VACUUM error: {e}")
+
+        log("cleanup", f"koniec ({reason}) · łącznie {total}")
+
+    @tasks.loop(time=time(4, 0, tzinfo=TZ))
+    @guarded
+    async def cleanup_task(self):
+        await self._run_cleanup(reason="daily-4:00")
 
     @cleanup_task.before_loop
     async def before_cleanup(self):
@@ -4599,7 +4484,7 @@ async def _build_status_embed() -> discord.Embed:
     emb.add_field(name="MVP (czas ankiety)", value=f"**{mvp_duration_hours()} h**", inline=True)
     q = len(_schedule_queue_load())
     if q:
-        emb.add_field(name="Kolejka terminów", value=f"**{q}** · 12:30–21:15 · co 15 s", inline=True)
+        emb.add_field(name="Kolejka terminów", value=f"**{q}** · 9:30–21:15 · co 15 s", inline=True)
     return emb
 
 
@@ -4933,8 +4818,8 @@ def _pomoc_category_embed(cat: str) -> discord.Embed:
         emb.title = "🤖 Automaty"
         emb.description = (
             "Prematch 60/30/10 · LIVE · tabela · GIF\n"
-            "Zmiana terminu (kolejka poza 12:30–21:15)\n"
-            "AREDL ~10 min · MVP · weekly · soft-start PV"
+            "Zmiana terminu (kolejka poza 9:30–21:15)\n"
+            "AREDL ~10 min · MVP · weekly · cleanup 4:00"
         )
     emb.set_footer(text="Wybierz inną kategorię z listy poniżej")
     return emb
@@ -5945,17 +5830,21 @@ async def on_ready():
         embeds.AUTHOR_ICON = str(bot.user.display_avatar.url)
     except Exception:
         pass
-    log("ready", "Bot gotowy – soft-start ~35 s (sync komend bez kolejki).")
+    log("ready", "Bot gotowy – start zadań od razu (bez soft-startu).")
     if bot._announced:
         return
     bot._announced = True
 
     async def _send_restart_notice():
-        """Soft-start tylko na PV właściciela serwera (nie na kanał publiczny)."""
-        emb = bot._boot_progress_embed(set(), current="live")
-        emb.set_footer(text="Tylko Ty to widzisz (PV) · zniknie za ~2 min")
+        """Krótki PV do właściciela: bot online (bez progress bara)."""
+        emb = discord.Embed(
+            title="✅ Bot online",
+            description=f"Wersja **`{BOT_VERSION}`** · zadania uruchomione",
+            color=0x57F287,
+            timestamp=datetime.now(TZ),
+        )
+        emb.set_footer(text="PV właściciela · zniknie za ~90 s")
 
-        # Zbierz owner_id (bez intents.members guild.owner bywa None)
         owner_ids: list[int] = []
         main_id = bot._main_channel_id()
         if main_id:
@@ -5976,10 +5865,9 @@ async def on_ready():
             try:
                 user = bot.get_user(oid) or await bot.fetch_user(oid)
                 msg = await user.send(embed=emb)
-                bot._boot_msg = msg
 
                 async def _delete_later(m=msg):
-                    await asyncio.sleep(120)
+                    await asyncio.sleep(90)
                     try:
                         await m.delete()
                     except Exception:
